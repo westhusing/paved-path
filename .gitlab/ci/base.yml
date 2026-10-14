@@ -1,0 +1,56 @@
+# Paved-path CI template (GitLab). Adopt from your project's .gitlab-ci.yml:
+#
+#   include:
+#     - local: '.gitlab/ci/base.yml'
+#
+# Every change gets the same gates, in order: lint -> test -> build -> scan.
+# The service matrix is what makes this scale: adding a service to the repo
+# adds it to every pipeline automatically — no per-service CI editing.
+
+stages:
+  - lint
+  - test
+  - build
+  - scan
+
+pp:lint:
+  stage: lint
+  image: golang:1.24-alpine
+  script:
+    - go vet ./...
+
+pp:test:
+  stage: test
+  image: golang:1.24-alpine
+  script:
+    - go test ./...
+
+pp:image:
+  stage: build
+  image: docker:27
+  services: [docker:27-dind]
+  variables:
+    DOCKER_BUILDKIT: "1"
+  parallel:
+    matrix:
+      - SERVICE: ["gateway", "billing", "worker"]
+  script:
+    - docker build --build-arg SERVICE=$SERVICE -t $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA .
+
+pp:scan:
+  stage: scan
+  image: golang:1.24-alpine
+  before_script:
+    - apk add --no-cache curl
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+  script:
+    - govulncheck ./...
+
+pp:image-scan:
+  stage: scan
+  image: aquasec/trivy:0.53.0
+  parallel:
+    matrix:
+      - SERVICE: ["gateway", "billing", "worker"]
+  script:
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA
