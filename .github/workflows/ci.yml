@@ -5,9 +5,6 @@
 name: ci
 on: [push, pull_request]
 
-env:
-  SERVICES: gateway,billing,worker
-
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -29,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: ${{ fromJSON(fmt('["%s"]', env.SERVICES)) }}
+        service: [gateway, billing, worker]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -43,3 +40,20 @@ jobs:
         with: { go-version-file: go.mod }
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...
+
+  # Same image scan as the GitLab template (pp:image-scan): HIGH/CRITICAL
+  # findings fail the pipeline. Rebuilds locally so it runs without a registry.
+  image-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, billing, worker]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - run: docker build --build-arg SERVICE=${{ matrix.service }} -t "paved-path/${{ matrix.service }}:${GITHUB_SHA}" .
+      - uses: aquasec/trivy-action@0.24.0
+        with:
+          image-ref: "paved-path/${{ matrix.service }}:${GITHUB_SHA}"
+          severity: HIGH,CRITICAL
+          exit-code: "1"

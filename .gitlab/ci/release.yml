@@ -1,33 +1,46 @@
 # Release promotion (GitLab). Include alongside base.yml; runs only on tags.
-# The same artifact built from the tag is signed, gets an SBOM, and lands in a
-# release manifest. Nothing else reaches production.
+# The same artifact built from the tag is promoted, signed, and gets an SBOM.
+# Nothing else reaches production.
 
+# Promotion = retag the SHA image that already passed build+scan, then push
+# the tag. We deliberately do NOT rebuild here: rebuilding on the tag would
+# produce new bytes and break "the exact image that passed tests is what
+# reaches prod". (The SHA image exists because pp:image in base.yml runs on
+# tag pipelines too, and the release stage orders after build+scan.)
 pp:release-image:
-  stage: build
+  stage: release
   image: docker:27
   services: [docker:27-dind]
-  variables:
-    DOCKER_BUILDKIT: "1"
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  parallel:
+    matrix:
+      - SERVICE: ["gateway", "billing", "worker"]
   script:
-    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG .
-    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+    - docker pull $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA
+    - docker tag  $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG
+    - docker push $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG
 
 pp:sign-release:
-  stage: scan
-  image: gcr.io/go-releaser/cosign:v2.4.0
+  stage: release
+  image: gcr.io/projectsigstore/cosign:v2.4.0
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  parallel:
+    matrix:
+      - SERVICE: ["gateway", "billing", "worker"]
   script:
-    - cosign sign --yes $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+    - cosign sign --yes $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG
 
 pp:sbom:
-  stage: scan
+  stage: release
   image: anchore/syft:1.14.0
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  parallel:
+    matrix:
+      - SERVICE: ["gateway", "billing", "worker"]
   script:
-    - syft image $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG --output spdx-json=release-$CI_COMMIT_TAG.spdx.json
+    - syft image $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG --output spdx-json=release-$SERVICE-$CI_COMMIT_TAG.spdx.json
   artifacts:
     paths: [release-*.spdx.json]

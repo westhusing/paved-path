@@ -24,7 +24,11 @@ test: ## run all tests (all services)
 	go test ./...
 
 lint: ## static checks (golangci-lint if present, else go vet)
-	@command -v golangci-lint >/dev/null && golangci-lint run || go vet ./...
+	@if command -v golangci-lint >/dev/null; then \
+	  golangci-lint run; \
+	else \
+	  go vet ./...; \
+	fi
 
 build: ## build every service (reproducible flags)
 	@for s in $(SERVICES); do \
@@ -33,7 +37,11 @@ build: ## build every service (reproducible flags)
 	done
 
 scan: ## vulnerability scan (govulncheck if present, else go vet)
-	@command -v govulncheck >/dev/null && govulncheck ./... || go vet ./...
+	@if command -v govulncheck >/dev/null; then \
+	  govulncheck ./...; \
+	else \
+	  go vet ./...; \
+	fi
 
 image: ## build one service image (make image SERVICE=billing)
 	docker build --build-arg SERVICE=$(SERVICE) -t $(IMG)/$(SERVICE):dev .

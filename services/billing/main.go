@@ -35,7 +35,14 @@ func main() {
 		json.NewEncoder(w).Encode(q)
 	})
 
-	srv := &http.Server{Addr: ":8081", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	// Port comes from the environment so one image can be deployed behind
+	// any host-port mapping; 8080 is the container default (see Dockerfile).
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	logger.Info("listening", "addr", srv.Addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server", "err", err)

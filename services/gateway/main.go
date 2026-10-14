@@ -20,8 +20,15 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", health.Handler())
 
+	// Port comes from the environment so one image can be deployed behind
+	// any host-port mapping; 8080 is the container default (see Dockerfile).
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	srv := &http.Server{
-		Addr:              ":8080",
+		Addr:              ":" + port,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
