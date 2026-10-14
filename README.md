@@ -31,8 +31,9 @@ Everything else is in `make help`. Per-service targets take `SERVICE=`:
 | Shared image policy | `Dockerfile` | ONE Dockerfile for every service, parameterized by `SERVICE`; pinned base, non-root distroless |
 | Local dev environment | `.devcontainer/` | Same toolchain for everyone, including agents |
 | CI gates (GitLab) | `.gitlab/ci/base.yml` | lint → test → build → scan; service matrix — new services join every pipeline automatically |
-| Release promotion (GitLab) | `.gitlab/ci/release.yml` | tag → signed image + SBOM; nothing else ships |
+| Release promotion (GitLab) | `.gitlab/ci/release.yml` | tag → promote SHA image, sign, SBOM; nothing else ships |
 | CI gates (GitHub Actions) | `.github/workflows/ci.yml` | same gates, second platform — templates stay in lockstep |
+| Release promotion (GitHub Actions) | `.github/workflows/release.yml` | same tag pipeline as GitLab: promote, sign (keyless), SBOM to GHCR |
 | Local release path | `scripts/release.sh` | per-service SBOM + cosign signature + manifest, and a fleet manifest for `--all` |
 | Setup-time measurement | `scripts/setup-time.sh`, `scripts/fleet-metrics.sh` | onboarding as a metric: per-service, with fleet rollup (median/worst) |
 | Agent operating rules | `AGENTS.md` | how coding agents work in this repo, versioned with the code |
@@ -79,3 +80,6 @@ must. Keep the invariants: one entry point, same gates everywhere, promoted
 artifacts, measured onboarding. Then read `docs/SCALE.md` for what changes
 when "your repo" becomes "the company's repos." The tools are the easy part;
 the invariants and the ownership model are the paved path.
+
+MIT-licensed (see `LICENSE`), so "steal it" is literal: fork, copy the
+patterns, or lift whole files. No attribution required, though it's welcome.

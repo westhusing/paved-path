@@ -13,6 +13,17 @@ the change is reviewable like any other diff.
    `.github/workflows/` in the same commit. The two platforms are a pair;
    they drift when they're edited separately.
 
+## How the CI is shaped (don't break this)
+
+- Branches/PRs run `ci.yml` / `base.yml`: lint -> test -> build -> scan.
+- Tags run the release pipeline (`release.yml` on both platforms): the same
+  gates, then promotion. Promotion retags the SHA image that passed; it
+  never rebuilds.
+- Tool versions in CI (trivy, cosign, syft) are matched across both
+  platforms on purpose. If you bump one, bump the other in the same commit.
+- Actions are pinned by commit SHA with a version comment; base images are
+  pinned by digest. Don't "tidy" these into tags.
+
 ## Long-running processes: fully detach them
 
 A watcher, server, or daemon started from a shell that waits for its output

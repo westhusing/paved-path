@@ -1,59 +1,80 @@
 # Paved-path CI (GitHub Actions). Same gates as the GitLab template:
 # lint -> test -> build -> scan. The service matrix is what makes this scale:
 # adding a service to the repo adds it to every pipeline automatically.
+#
+# Branches and PRs run this workflow; tags run release.yml (the promotion
+# pipeline), mirroring the GitLab split between branch and tag pipelines.
 
 name: ci
-on: [push, pull_request]
+on:
+  pull_request:
+  push:
+    branches: ['**']
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: { go-version-file: go.mod }
       - run: go vet ./...
 
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: { go-version-file: go.mod }
       - run: go test ./...
 
+  # Plain `docker build` (default builder): the image lands in the local
+  # daemon, which is what trivy needs to find it. A buildx container-driver
+  # builder would leave it in the build cache instead.
   image:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         service: [gateway, billing, worker]
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: docker build --build-arg SERVICE=${{ matrix.service }} -t "paved-path/${{ matrix.service }}:${GITHUB_SHA}" .
 
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: { go-version-file: go.mod }
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...
 
-  # Same image scan as the GitLab template (pp:image-scan): HIGH/CRITICAL
-  # findings fail the pipeline. Rebuilds locally so it runs without a registry.
+  # Same image scan as the GitLab template (pp:image-scan): same trivy
+  # image, same command. The Go-stdlib CVEs in .trivyignore are an
+  # accepted-risk policy (see that file); OS/package CVEs still fail.
+  #
+  # One deliberate difference from GitLab: branch CI scans the image in the
+  # local daemon (built above) instead of pulling it from a registry. We don't
+  # push on PRs because GITHUB_TOKEN can't write to GHCR for forks, and the
+  # image bytes are identical either way. Release CI (release.yml) does push
+  # to GHCR and scans from there, matching GitLab's registry-based scan.
   image-scan:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         service: [gateway, billing, worker]
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: docker build --build-arg SERVICE=${{ matrix.service }} -t "paved-path/${{ matrix.service }}:${GITHUB_SHA}" .
-      - uses: aquasec/trivy-action@0.24.0
-        with:
-          image-ref: "paved-path/${{ matrix.service }}:${GITHUB_SHA}"
-          severity: HIGH,CRITICAL
-          exit-code: "1"
+      # The trivy image's entrypoint IS the tool; clear it so we can run a
+      # shell (same as the GitLab job). The image is in the local daemon
+      # because we used plain `docker build`, so trivy reads it via the socket.
+      # The ref is expanded on the runner (bash) and passed in single quotes,
+      # because $GITHUB_SHA is not set inside the trivy container.
+      - run: |
+          img="paved-path/${{ matrix.service }}:${GITHUB_SHA}"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/.trivyignore":/tmp/trivyignore:ro \
+            --entrypoint "" aquasec/trivy:0.53.0 sh -c \
+            "trivy image --ignorefile /tmp/trivyignore --exit-code 1 --severity HIGH,CRITICAL '$img'"

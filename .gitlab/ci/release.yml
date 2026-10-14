@@ -16,30 +16,56 @@ pp:release-image:
   parallel:
     matrix:
       - SERVICE: ["gateway", "billing", "worker"]
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
     - docker pull $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA
     - docker tag  $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG
     - docker push $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG
 
+# cosign and syft run from official static binaries on the golang image
+# rather than their official images: those images have no shell (their
+# entrypoint IS the tool), and GitLab needs a shell to run script lines.
+# `go install` is out too: syft v1.14.0's go.mod has a replace directive,
+# which `go install` rejects. Same tool versions as the GitHub release
+# workflow: cosign v2.4.0, syft v1.14.0.
 pp:sign-release:
   stage: release
-  image: gcr.io/projectsigstore/cosign:v2.4.0
+  image: golang:1.24-alpine
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  # Keyless signing needs an OIDC token; GitLab mints one for this job.
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
   parallel:
     matrix:
       - SERVICE: ["gateway", "billing", "worker"]
+  before_script:
+    # No docker CLI in this image; cosign reads registry credentials from
+    # the standard docker config, so write it directly.
+    - mkdir -p ~/.docker && printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+        "$CI_REGISTRY" "$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64)" > ~/.docker/config.json
+    - wget -qO /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.0/cosign-linux-amd64
+    - chmod +x /usr/local/bin/cosign
   script:
     - cosign sign --yes $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG
 
 pp:sbom:
   stage: release
-  image: anchore/syft:1.14.0
+  image: golang:1.24-alpine
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
   parallel:
     matrix:
       - SERVICE: ["gateway", "billing", "worker"]
+  before_script:
+    # No docker CLI in this image; syft reads registry credentials from
+    # the standard docker config, so write it directly.
+    - mkdir -p ~/.docker && printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+        "$CI_REGISTRY" "$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64)" > ~/.docker/config.json
+    - wget -qO /tmp/syft.tgz https://github.com/anchore/syft/releases/download/v1.14.0/syft_1.14.0_linux_amd64.tar.gz
+    - tar -xzf /tmp/syft.tgz -C /usr/local/bin syft
   script:
     - syft image $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG --output spdx-json=release-$SERVICE-$CI_COMMIT_TAG.spdx.json
   artifacts:

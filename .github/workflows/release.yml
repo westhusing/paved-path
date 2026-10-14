@@ -1,0 +1,142 @@
+# Release promotion (GitHub Actions). Mirrors .gitlab/ci/release.yml: the
+# SHA image that passed build+scan is promoted (retagged), signed, and gets
+# an SBOM. Nothing else ships.
+#
+# ci.yml owns branches/PRs; this workflow owns tags, so a tag push runs the
+# full gate (lint -> test -> build -> scan) and then promotion, in that order
+# via `needs:` — the same stage ordering as the GitLab tag pipeline.
+
+name: release
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+  packages: write   # push images to GHCR
+  id-token: write   # cosign keyless signing (Sigstore OIDC)
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: { go-version-file: go.mod }
+      - run: go vet ./...
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: { go-version-file: go.mod }
+      - run: go test ./...
+
+  image:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, billing, worker]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin "$REGISTRY"
+      # Promote, never rebuild: if the SHA image already exists (pushed by an
+      # earlier pipeline for this commit), use it as-is. Rebuilding the same
+      # commit with digest-pinned inputs would produce identical bytes, but we
+      # don't need to rely on that.
+      - run: |
+          img="$REGISTRY/${{ github.repository }}/${{ matrix.service }}:$GITHUB_SHA"
+          if docker manifest inspect "$img" >/dev/null 2>&1; then
+            echo "SHA image already in registry; skipping rebuild"
+            exit 0
+          fi
+          docker build --build-arg SERVICE=${{ matrix.service }} -t "$img" .
+          docker push "$img"
+
+  scan:
+    needs: [image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: { go-version-file: go.mod }
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  image-scan:
+    needs: [image]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, billing, worker]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin "$REGISTRY"
+      # Same trivy image and command as the GitLab template (pp:image-scan).
+      # The ref is expanded on the runner and passed in single quotes, because
+      # $REGISTRY/$GITHUB_SHA are not set inside the trivy container.
+      - run: |
+          img="$REGISTRY/${{ github.repository }}/${{ matrix.service }}:$GITHUB_SHA"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/.trivyignore":/tmp/trivyignore:ro \
+            --entrypoint "" aquasec/trivy:0.53.0 sh -c \
+            "trivy image --ignorefile /tmp/trivyignore --exit-code 1 --severity HIGH,CRITICAL '$img'"
+
+  promote:
+    needs: [scan, image-scan]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, billing, worker]
+    steps:
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin "$REGISTRY"
+      # Promotion = retag the SHA image that passed build+scan, then push the
+      # tag. No rebuild: the exact bytes that were tested are what ships.
+      - run: |
+          img="$REGISTRY/${{ github.repository }}/${{ matrix.service }}"
+          docker pull "$img:$GITHUB_SHA"
+          docker tag  "$img:$GITHUB_SHA" "$img:${GITHUB_REF_NAME}"
+          docker push "$img:${GITHUB_REF_NAME}"
+
+  sign:
+    needs: [promote]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, billing, worker]
+    steps:
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin "$REGISTRY"
+      # Same cosign version as the GitLab template. Official static binary
+      # (the official image has no shell; `go install` works for cosign but
+      # not for syft, so both use binaries to stay in lockstep). Keyless
+      # signing uses the runner's built-in OIDC (permissions: id-token:
+      # write above); cosign picks it up automatically on GitHub Actions.
+      - run: |
+          wget -qO /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.0/cosign-linux-amd64
+          chmod +x /usr/local/bin/cosign
+      - run: cosign sign --yes "$REGISTRY/${{ github.repository }}/${{ matrix.service }}:${GITHUB_REF_NAME}"
+
+  sbom:
+    needs: [promote]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, billing, worker]
+    steps:
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin "$REGISTRY"
+      # Same syft version as the GitLab template. Official static binary:
+      # `go install` rejects syft v1.14.0 (replace directive in its go.mod).
+      - run: |
+          wget -qO /tmp/syft.tgz https://github.com/anchore/syft/releases/download/v1.14.0/syft_1.14.0_linux_amd64.tar.gz
+          tar -xzf /tmp/syft.tgz -C /usr/local/bin syft
+      - run: syft image "$REGISTRY/${{ github.repository }}/${{ matrix.service }}:${GITHUB_REF_NAME}" --output spdx-json="sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: "sbom-${{ matrix.service }}-*.spdx.json"

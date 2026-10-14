@@ -38,7 +38,18 @@ pp:image:
   parallel:
     matrix:
       - SERVICE: ["gateway", "billing", "worker"]
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
+    # Promote, never rebuild: if the SHA image already exists (pushed by a
+    # branch pipeline for this commit), use it as-is. Rebuilding the same
+    # commit with digest-pinned inputs would produce identical bytes, but we
+    # don't need to rely on that.
+    - |
+      if docker manifest inspect "$CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA" >/dev/null 2>&1; then
+        echo "SHA image already in registry; skipping rebuild"
+        exit 0
+      fi
     - docker build --build-arg SERVICE=$SERVICE -t $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA .
     # Push the immutable SHA image. Release promotion (release.yml) retags
     # THIS exact artifact; it never rebuilds.
@@ -55,8 +66,17 @@ pp:scan:
 pp:image-scan:
   stage: scan
   image: aquasec/trivy:0.53.0
+  # The trivy image's entrypoint IS the tool; GitLab needs a shell to run
+  # script lines, so clear it (GitLab's documented trivy setup).
+  entrypoint: [""]
   parallel:
     matrix:
       - SERVICE: ["gateway", "billing", "worker"]
+  # The trivy image has no docker CLI, so registry auth goes through trivy's
+  # own env vars instead of `docker login`. Same command as the GitHub
+  # image-scan job, including the accepted-risk .trivyignore (Go stdlib).
+  variables:
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
   script:
-    - trivy image --exit-code 1 --severity HIGH,CRITICAL $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA
+    - trivy image --ignorefile .trivyignore --exit-code 1 --severity HIGH,CRITICAL $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA
