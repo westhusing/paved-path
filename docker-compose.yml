@@ -1,0 +1,8 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        SERVICE: gateway
+    ports:
+      - "8090:8080"  # host port is yours to change; the container always listens on 8080

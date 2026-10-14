@@ -1,0 +1,14 @@
+{
+  "name": "paved-path",
+  "image": "golang:1.24-alpine",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {}
+  },
+  "postCreateCommand": "go install golang.org/x/vuln/cmd/govulncheck@latest",
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go"]
+    }
+  },
+  "forwardPorts": [8080]
+}

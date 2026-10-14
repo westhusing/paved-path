@@ -1,0 +1,5 @@
+bin/
+sbom-*.spdx.json
+release-*.manifest.json
+fleet-*.manifest.json
+fleet-metrics.json
