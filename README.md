@@ -30,7 +30,7 @@ Everything else is in `make help`. Per-service targets take `SERVICE=`:
 | Makefile (single entry point) | `Makefile` | One vocabulary for local and CI; fleet-aware (`SERVICE=` or all) |
 | Shared image policy | `Dockerfile` | ONE Dockerfile for every service, parameterized by `SERVICE`; pinned base, non-root distroless |
 | Local dev environment | `.devcontainer/` | Same toolchain for everyone, including agents |
-| CI gates (GitLab) | `.gitlab/ci/base.yml` | lint → test → build → scan; service matrix — new services join every pipeline automatically |
+| CI gates (GitLab) | `.gitlab/ci/base.yml` | lint → test (+race) → build+scan; service matrix — new services join every pipeline automatically |
 | Release promotion (GitLab) | `.gitlab/ci/release.yml` | tag → promote SHA image, sign, SBOM; nothing else ships |
 | CI gates (GitHub Actions) | `.github/workflows/ci.yml` | same gates, second platform — templates stay in lockstep |
 | Release promotion (GitHub Actions) | `.github/workflows/release.yml` | same tag pipeline as GitLab: promote, sign (keyless), SBOM to GHCR |
@@ -60,11 +60,21 @@ The Makefile targets are what the pipelines invoke. If a gate exists only in
 CI, developers meet it for the first time on their PR — the worst possible
 place to learn about a rule.
 
+**The Go version is part of the image policy.**
+The image scan gate (HIGH/CRITICAL, no ignore file) is only as clean as the
+toolchain that built the image: trivy's Go scanner reports CVEs in the
+standard library embedded in a static binary, and older toolchains carry
+them. So `go.mod` declares the version, the Dockerfile pin must match it,
+and bumping Go is how you clear stdlib findings instead of ignoring them.
+The ignore file was the workaround; the version bump is the fix.
+
 **Releases are a script, not a ritual.**
-`scripts/release.sh` and the tag pipeline do the same thing: build, SBOM via
-syft, keyless signature via cosign, write a manifest. `--all` adds a fleet
-manifest so "what is running in prod" has one answer. A release that depends
-on someone remembering the steps is not a release process.
+`scripts/release.sh` runs the release steps locally: build, SBOM via syft,
+keyless signature via cosign, write a manifest. `--all` adds a fleet
+manifest so "what is running in prod" has one answer. The tag pipeline does
+the same steps against the promoted SHA image (it retags, it doesn't rebuild,
+and it ships signatures and SBOMs instead of manifests). A release that
+depends on someone remembering the steps is not a release process.
 
 **Setup time is a metric, and it has a fleet rollup.**
 `make setup-time` measures fresh-clone → first passing test for one service;

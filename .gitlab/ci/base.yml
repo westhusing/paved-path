@@ -3,7 +3,7 @@
 #   include:
 #     - local: '.gitlab/ci/base.yml'
 #
-# Every change gets the same gates, in order: lint -> test -> build -> scan.
+# Every change gets the same gates, in order: lint -> test -> build+scan.
 # The service matrix is what makes this scale: adding a service to the repo
 # adds it to every pipeline automatically — no per-service CI editing.
 
@@ -17,29 +17,64 @@ stages:
   - scan
   - release
 
+# Go version must match go.mod (see AGENTS.md). 1.27, not just "new
+# enough": the stdlib CVEs that older toolchains embed in static binaries
+# are what image scanners flag, and 1.27's stdlib is clean — which is why
+# the image scan below needs no ignore file.
+GO_IMAGE: golang:1.27-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
+
+# govulncheck is pinned, not @latest: an unpinned tool version in a
+# "reproducible" repo is the same class of bug as an unpinned base image.
+# v1.9.0 requires Go >= 1.26, which the image above satisfies.
+GOVULNCHECK_VERSION: v1.9.0
+
 pp:lint:
   stage: lint
-  image: golang:1.24-alpine
+  image: $GO_IMAGE
   script:
     - go vet ./...
 
+# Same bash gate as the GitHub actionlint job: shellcheck on every script.
+# (GitLab validates .gitlab-ci.yml itself when it creates the pipeline, so
+# there is no separate YAML linter to run here; GitHub gets actionlint for
+# its workflow files.) The binary is x86_64 because GitLab.com shared
+# runners are; on an arm64 runner, swap in the .linux.aarch64 asset.
+pp:shellcheck:
+  stage: lint
+  image: $GO_IMAGE
+  script:
+    - wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+    - tar -xJf /tmp/shellcheck.tgz -C /usr/local/bin --strip-components=1 shellcheck-v0.10.0/shellcheck
+    - shellcheck scripts/*.sh
+
 pp:test:
   stage: test
-  image: golang:1.24-alpine
+  image: $GO_IMAGE
   script:
     - go test ./...
 
+# Race detector on every commit. The alpine image has no C compiler and
+# -race needs cgo, so build-base is installed for this job only. The GitHub
+# runner has a toolchain already, so it runs the same gate with no setup.
+pp:race:
+  stage: test
+  image: $GO_IMAGE
+  script:
+    - apk add --no-cache build-base
+    - CGO_ENABLED=1 go test -race ./...
+
 pp:image:
   stage: build
-  image: docker:27
-  services: [docker:27-dind]
+  image: docker:27@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
+  services: ["docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce"]
   variables:
     DOCKER_BUILDKIT: "1"
   parallel:
     matrix:
       - SERVICE: ["gateway", "billing", "worker"]
   before_script:
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    # --password-stdin keeps the password out of `ps` output.
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     # Promote, never rebuild: if the SHA image already exists (pushed by a
     # branch pipeline for this commit), use it as-is. Rebuilding the same
@@ -57,26 +92,28 @@ pp:image:
 
 pp:scan:
   stage: scan
-  image: golang:1.24-alpine
-  before_script:
-    - go install golang.org/x/vuln/cmd/govulncheck@latest
+  image: $GO_IMAGE
   script:
+    - go install golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION
     - govulncheck ./...
 
 pp:image-scan:
   stage: scan
-  image: aquasec/trivy:0.53.0
-  # The trivy image's entrypoint IS the tool; GitLab needs a shell to run
-  # script lines, so clear it (GitLab's documented trivy setup).
+  # Digest-pinned, same image and command as the GitHub workflow. The trivy
+  # image's entrypoint IS the tool; GitLab needs a shell to run script lines,
+  # so clear it (GitLab's documented trivy setup). No ignore file: a Go 1.27
+  # build embeds a stdlib with no known HIGH/CRITICAL CVEs, so the gate is
+  # fully real. (The trivy DB download is not cached: it's a few MB, and
+  # caching it would add a cache key to keep in sync for little gain.)
+  image: aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
   entrypoint: [""]
   parallel:
     matrix:
       - SERVICE: ["gateway", "billing", "worker"]
   # The trivy image has no docker CLI, so registry auth goes through trivy's
-  # own env vars instead of `docker login`. Same command as the GitHub
-  # image-scan job, including the accepted-risk .trivyignore (Go stdlib).
+  # own env vars instead of `docker login`.
   variables:
     TRIVY_USERNAME: $CI_REGISTRY_USER
     TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
   script:
-    - trivy image --ignorefile .trivyignore --exit-code 1 --severity HIGH,CRITICAL $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA

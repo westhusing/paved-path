@@ -6,7 +6,10 @@
 # 40 services share an image policy: one file to review, one place to change.
 # Pinned by digest, not tag: a tag can be re-pushed upstream and silently
 # change your build inputs. The digest is the actual pin.
-FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS build
+# Go version is declared in go.mod; this pin must match it (see AGENTS.md).
+# 1.27, not just "new enough": the stdlib CVEs that older toolchains embed in
+# static binaries are what image scanners flag, and 1.27's stdlib is clean.
+FROM golang:1.27-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build
 ARG SERVICE
 WORKDIR /src
 

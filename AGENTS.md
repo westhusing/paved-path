@@ -15,14 +15,21 @@ the change is reviewable like any other diff.
 
 ## How the CI is shaped (don't break this)
 
-- Branches/PRs run `ci.yml` / `base.yml`: lint -> test -> build -> scan.
+- Branches/PRs run `ci.yml` / `base.yml`: lint -> test (+race) -> build+scan.
 - Tags run the release pipeline (`release.yml` on both platforms): the same
   gates, then promotion. Promotion retags the SHA image that passed; it
-  never rebuilds.
-- Tool versions in CI (trivy, cosign, syft) are matched across both
-  platforms on purpose. If you bump one, bump the other in the same commit.
-- Actions are pinned by commit SHA with a version comment; base images are
-  pinned by digest. Don't "tidy" these into tags.
+  never rebuilds. Tag rules match stable versions (`v1.2.3`) and release
+  candidates (`v1.2.3-rc.1`); the GitLab regex and the GitHub filter
+  patterns must stay in sync.
+- Tool versions in CI (trivy, cosign, syft, govulncheck) are matched across
+  both platforms on purpose. If you bump one, bump the other in the same
+  commit.
+- The Go version is declared in `go.mod` and must match the toolchain image
+  pins (`Dockerfile`, `.gitlab/ci/base.yml`). Bumping Go is what keeps the
+  image scan clean: older toolchains embed stdlib CVEs in static binaries,
+  which is why the scan gate has no ignore file.
+- Actions are pinned by commit SHA with a version comment; base images and
+  CI tool images are pinned by digest. Don't "tidy" these into tags.
 
 ## Long-running processes: fully detach them
 

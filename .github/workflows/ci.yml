@@ -1,5 +1,5 @@
 # Paved-path CI (GitHub Actions). Same gates as the GitLab template:
-# lint -> test -> build -> scan. The service matrix is what makes this scale:
+# lint -> test -> build+scan. The service matrix is what makes this scale:
 # adding a service to the repo adds it to every pipeline automatically.
 #
 # Branches and PRs run this workflow; tags run release.yml (the promotion
@@ -11,7 +11,28 @@ on:
   push:
     branches: ['**']
 
+# One pipeline per branch at a time; a newer push supersedes the older one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # The workflow files are code; lint them in the same pipeline they run.
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: |
+          wget -qO /tmp/actionlint.tgz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint
+      # shellcheck is the same idea for the bash scripts.
+      - run: |
+          wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+          tar -xJf /tmp/shellcheck.tgz -C /usr/local/bin --strip-components=1 shellcheck-v0.10.0/shellcheck
+      # No args: actionlint finds every workflow under .github/workflows.
+      - run: actionlint
+      - run: shellcheck scripts/*.sh
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -27,10 +48,14 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: { go-version-file: go.mod }
       - run: go test ./...
+      # Race detector on every commit. ubuntu-latest has a C toolchain, so no
+      # extra setup; the GitLab job installs build-base for the same gate.
+      - run: CGO_ENABLED=1 go test -race ./...
 
-  # Plain `docker build` (default builder): the image lands in the local
-  # daemon, which is what trivy needs to find it. A buildx container-driver
-  # builder would leave it in the build cache instead.
+  # Build and scan in ONE job: the image lands in this runner's daemon, so
+  # trivy reads it via the socket. Splitting build and scan across jobs would
+  # require pushing to a registry just to hand the artifact over. (The tag
+  # pipeline in release.yml does push, because promotion needs a registry.)
   image:
     runs-on: ubuntu-latest
     strategy:
@@ -38,7 +63,22 @@ jobs:
         service: [gateway, billing, worker]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Plain `docker build` (default builder): the image lands in the local
+      # daemon, which is what trivy needs to find it. A buildx container-
+      # driver builder would leave it in the build cache instead.
       - run: docker build --build-arg SERVICE=${{ matrix.service }} -t "paved-path/${{ matrix.service }}:${GITHUB_SHA}" .
+      # Same trivy image and command as the GitLab template (pp:image-scan).
+      # The trivy image's entrypoint IS the tool; clear it so we can run a
+      # shell (same as the GitLab job). The ref is expanded on the runner
+      # (bash) and passed in single quotes, because $GITHUB_SHA is not set
+      # inside the trivy container. No ignore file: a Go 1.27 build embeds a
+      # stdlib with no known HIGH/CRITICAL CVEs, so the gate is fully real.
+      - run: |
+          img="paved-path/${{ matrix.service }}:${GITHUB_SHA}"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --entrypoint "" aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
+            "trivy image --exit-code 1 --severity HIGH,CRITICAL '$img'"
 
   scan:
     runs-on: ubuntu-latest
@@ -46,35 +86,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: { go-version-file: go.mod }
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      # Pinned, not @latest (see Makefile). v1.9.0 requires Go >= 1.26;
+      # go.mod declares 1.27, so setup-go above already satisfies it.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - run: govulncheck ./...
-
-  # Same image scan as the GitLab template (pp:image-scan): same trivy
-  # image, same command. The Go-stdlib CVEs in .trivyignore are an
-  # accepted-risk policy (see that file); OS/package CVEs still fail.
-  #
-  # One deliberate difference from GitLab: branch CI scans the image in the
-  # local daemon (built above) instead of pulling it from a registry. We don't
-  # push on PRs because GITHUB_TOKEN can't write to GHCR for forks, and the
-  # image bytes are identical either way. Release CI (release.yml) does push
-  # to GHCR and scans from there, matching GitLab's registry-based scan.
-  image-scan:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        service: [gateway, billing, worker]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: docker build --build-arg SERVICE=${{ matrix.service }} -t "paved-path/${{ matrix.service }}:${GITHUB_SHA}" .
-      # The trivy image's entrypoint IS the tool; clear it so we can run a
-      # shell (same as the GitLab job). The image is in the local daemon
-      # because we used plain `docker build`, so trivy reads it via the socket.
-      # The ref is expanded on the runner (bash) and passed in single quotes,
-      # because $GITHUB_SHA is not set inside the trivy container.
-      - run: |
-          img="paved-path/${{ matrix.service }}:${GITHUB_SHA}"
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD/.trivyignore":/tmp/trivyignore:ro \
-            --entrypoint "" aquasec/trivy:0.53.0 sh -c \
-            "trivy image --ignorefile /tmp/trivyignore --exit-code 1 --severity HIGH,CRITICAL '$img'"

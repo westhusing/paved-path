@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Release path: build -> SBOM -> sign -> manifest.
-# Mirrors what CI does on a tag, so releases are identical locally and in CI.
+# The local counterpart of the tag pipeline (see .gitlab/ci/release.yml and
+# .github/workflows/release.yml): same steps (SBOM via syft, keyless cosign
+# signature), but locally we build and tag by version; CI promotes the SHA
+# image that passed build+scan instead of rebuilding it.
 #
 #   scripts/release.sh gateway 1.2.3     # release one service
 #   scripts/release.sh --all 1.2.3       # release every service + fleet manifest

@@ -11,17 +11,25 @@ IMG      ?= registry.example.com/paved-path
 # Support both the docker CLI plugin and standalone docker-compose.
 COMPOSE  := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
-.PHONY: help bootstrap test lint build scan image sign release release-all fleet-metrics setup-time up down
+.PHONY: help bootstrap test race lint build scan image sign release release-all fleet-metrics setup-time up down
 
 help: ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'
 
+# govulncheck is pinned, not @latest: an unpinned tool version in a
+# "reproducible" repo is the same class of bug as an unpinned base image.
+# v1.9.0 requires Go >= 1.26, which is why go.mod declares 1.27.
+GOVULNCHECK_VERSION ?= v1.9.0
+
 bootstrap: ## install dev tools (Go via brew; govulncheck optional)
 	@command -v go >/dev/null || { echo "install Go: brew install go"; exit 1; }
-	go install golang.org/x/vuln/cmd/govulncheck@latest || true
+	go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) || true
 
 test: ## run all tests (all services)
 	go test ./...
+
+race: ## race-detector pass (needs cgo; CI runs this on every commit)
+	CGO_ENABLED=1 go test -race ./...
 
 lint: ## static checks (golangci-lint if present, else go vet)
 	@if command -v golangci-lint >/dev/null; then \
