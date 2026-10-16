@@ -17,8 +17,12 @@ on:
 
 permissions:
   contents: read
-  packages: write   # push images to GHCR
-  id-token: write   # cosign keyless signing (Sigstore OIDC)
+  packages: write   # push/pull images on GHCR (image, image-scan, promote,
+                    # sign, sbom all touch the registry)
+  # id-token: write is NOT here. Only the sign job needs it (cosign keyless
+  # signing mints a Sigstore OIDC token), so it is declared at that job's
+  # level below — least privilege, and a leaked workflow token can't mint OIDC
+  # tokens from the other jobs.
 
 env:
   REGISTRY: ghcr.io
@@ -50,10 +54,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin "$REGISTRY"
-      # Promote, never rebuild: if the SHA image already exists (pushed by an
-      # earlier pipeline for this commit), use it as-is. Rebuilding the same
-      # commit with digest-pinned inputs would produce identical bytes, but we
-      # don't need to rely on that.
+      # Promote, never rebuild: if the SHA image is already in the registry
+      # (from an earlier run of this same job, e.g. a retry after sign failed),
+      # use it as-is instead of rebuilding. The tag is the SHA, so an existing
+      # image was built from this exact commit; and with digest-pinned inputs a
+      # rebuild would be byte-identical anyway. image-scan still validates what's
+      # in the registry, so skipping the build doesn't skip the gate.
       - run: |
           img="$REGISTRY/${{ github.repository }}/${{ matrix.service }}:$GITHUB_SHA"
           if docker manifest inspect "$img" >/dev/null 2>&1; then
@@ -112,6 +118,12 @@ jobs:
 
   sign:
     needs: [promote]
+    # The only job that mints an OIDC token, so id-token: write lives here,
+    # not at the workflow level (see permissions above).
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # cosign keyless signing (Sigstore OIDC)
     runs-on: ubuntu-latest
     strategy:
       matrix:

@@ -1,5 +1,7 @@
 # Paved path: one entry point for everything a developer does in this repo.
-# Every target here is also what CI runs, so "works locally" == "passes in CI".
+# The CI pipelines run the same commands as these targets (directly, not via
+# make), so a gate you pass locally is the one CI checks. The trivy image scan
+# has no target here on purpose — scanning a built image is a pipeline concern.
 #
 # Multi-service: targets act on all services by default, or one via SERVICE=.
 #   make test                      # everything
@@ -11,7 +13,7 @@ IMG      ?= registry.example.com/paved-path
 # Support both the docker CLI plugin and standalone docker-compose.
 COMPOSE  := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
-.PHONY: help bootstrap test race lint build scan image sign release release-all fleet-metrics setup-time up down
+.PHONY: help bootstrap test race lint build scan ci-lint image sign release release-all fleet-metrics setup-time up down
 
 help: ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'
@@ -49,6 +51,31 @@ scan: ## vulnerability scan (govulncheck if present, else go vet)
 	  govulncheck ./...; \
 	else \
 	  go vet ./...; \
+	fi
+
+# Lint the CI config itself, locally. The workflow files are code; this runs
+# the same linters the actionlint job does (actionlint + shellcheck), so a
+# local pass predicts CI. The GitLab templates have no .gitlab-ci.yml to feed
+# `glab ci lint` (this repo IS the template), so it validates they parse as
+# YAML instead — the class of error that lint would catch. Comments live above
+# the target, not in the recipe: BSD make echoes in-recipe `#` lines.
+ci-lint:
+	@if command -v actionlint >/dev/null; then \
+	  echo "==> actionlint"; actionlint .github/workflows/; \
+	else \
+	  echo "actionlint not installed (CI runs it); skipping"; \
+	fi
+	@if command -v shellcheck >/dev/null; then \
+	  echo "==> shellcheck"; shellcheck scripts/*.sh; \
+	else \
+	  echo "shellcheck not installed (CI runs it); skipping"; \
+	fi
+	@if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then \
+	  echo "==> gitlab yaml"; python3 -c 'import glob,yaml; [yaml.safe_load(open(f)) for f in sorted(glob.glob(".gitlab/ci/*.yml"))]; print("ok")'; \
+	elif command -v ruby >/dev/null; then \
+	  echo "==> gitlab yaml"; ruby -ryaml -e 'Dir[".gitlab/ci/*.yml"].each{|f| YAML.load_file(f)}; puts "ok"'; \
+	else \
+	  echo "no yaml parser (python3+yaml or ruby) found; skipping GitLab template check"; \
 	fi
 
 image: ## build one service image (make image SERVICE=billing)

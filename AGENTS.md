@@ -11,7 +11,11 @@ the change is reviewable like any other diff.
 2. If you touched `Dockerfile`, run `make image` and confirm it builds.
 3. If you touched a CI template, update **both** `.gitlab/ci/` and
    `.github/workflows/` in the same commit. The two platforms are a pair;
-   they drift when they're edited separately.
+   they drift when they're edited separately. Then run `make ci-lint` — it
+   lints the workflow files (actionlint + shellcheck, same as CI) and checks
+   the GitLab templates parse. There's no `.gitlab-ci.yml` to feed `glab ci
+   lint` because this repo *is* the template; the YAML check is the local
+   stand-in.
 
 ## How the CI is shaped (don't break this)
 

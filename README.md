@@ -1,9 +1,9 @@
 # paved-path
 
 One entry point for everything a developer does in this repo: clone, build,
-test, scan, image, sign, release — for every service in the repo. If it works
-with `make`, it passes in CI: the local path and the pipeline are the same
-path.
+test, scan, image, sign, release — for every service in the repo. The local
+path and the pipeline run the same commands, so a gate you pass locally is the
+one CI checks.
 
 A small Go fleet (gateway, billing, worker) behind one shared image policy,
 one CI template pair, and one release script. The services are deliberately
@@ -56,9 +56,14 @@ Every environment runs the exact artifact that was tested. "Rebuild it for
 prod" is how bits change between staging and production.
 
 **Local and CI run the same commands.**
-The Makefile targets are what the pipelines invoke. If a gate exists only in
-CI, developers meet it for the first time on their PR — the worst possible
-place to learn about a rule.
+The Makefile is the local entry point; the pipelines don't call `make`, they
+run the same commands directly — go vet, go test -race, docker build with the
+shared Dockerfile, govulncheck and trivy at the same pinned versions. Same
+commands, no Makefile dependency in CI. The one gate with no `make` target is
+the trivy image scan, on purpose: scanning a built image is a pipeline and
+release concern, not part of the dev loop. The point stands: if a rule is real,
+the local target and the pipeline job run the same check, so developers meet it
+before their PR — not for the first time on review.
 
 **The Go version is part of the image policy.**
 The image scan gate (HIGH/CRITICAL, no ignore file) is only as clean as the

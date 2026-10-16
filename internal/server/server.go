@@ -23,7 +23,14 @@ func Run(log *slog.Logger, name string, h http.Handler) error {
 		port = "8080"
 	}
 
-	srv := &http.Server{Addr: ":" + port, Handler: h, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second, // slowloris: bound the request headers
+		ReadTimeout:       15 * time.Second, // whole read (headers + body)
+		WriteTimeout:      15 * time.Second, // whole write; keep > ReadTimeout
+		IdleTimeout:       60 * time.Second, // keep-alive connections
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

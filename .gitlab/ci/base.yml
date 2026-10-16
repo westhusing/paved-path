@@ -17,16 +17,20 @@ stages:
   - scan
   - release
 
-# Go version must match go.mod (see AGENTS.md). 1.27, not just "new
-# enough": the stdlib CVEs that older toolchains embed in static binaries
-# are what image scanners flag, and 1.27's stdlib is clean — which is why
-# the image scan below needs no ignore file.
-GO_IMAGE: golang:1.27-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
-
-# govulncheck is pinned, not @latest: an unpinned tool version in a
-# "reproducible" repo is the same class of bug as an unpinned base image.
-# v1.9.0 requires Go >= 1.26, which the image above satisfies.
-GOVULNCHECK_VERSION: v1.9.0
+# Top-level variables, not top-level keys. A bare `GO_IMAGE: ...` at the
+# root of a .gitlab-ci.yml is parsed as a JOB named GO_IMAGE (GitLab treats
+# any top-level mapping key that isn't a known keyword as a job), so these
+# must live under `variables:` to be usable as $GO_IMAGE.
+variables:
+  # Go version must match go.mod (see AGENTS.md). The digest pins the exact
+  # patch (1.27.2); go.mod declares the same, so setup-go on GitHub installs
+  # the identical toolchain. Newer Go is what keeps the stdlib CVEs out of
+  # static binaries — see the image-scan job below.
+  GO_IMAGE: golang:1.27-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
+  # govulncheck is pinned, not @latest: an unpinned tool version in a
+  # "reproducible" repo is the same class of bug as an unpinned base image.
+  # v1.9.0 requires Go >= 1.26, which the image above satisfies.
+  GOVULNCHECK_VERSION: v1.9.0
 
 pp:lint:
   stage: lint
@@ -44,6 +48,9 @@ pp:shellcheck:
   image: $GO_IMAGE
   script:
     - wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+    # shellcheck ships no checksums file, so the hash is pinned here. A
+    # download step that doesn't check its bytes is an unpinned dependency.
+    - echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tgz" | sha256sum -c -
     - tar -xJf /tmp/shellcheck.tgz -C /usr/local/bin --strip-components=1 shellcheck-v0.10.0/shellcheck
     - shellcheck scripts/*.sh
 
@@ -65,7 +72,14 @@ pp:race:
 
 pp:image:
   stage: build
-  image: docker:27@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
+  # The job image is the CLI-only variant (docker:27-cli): it needs the docker
+  # client to build/push and talks to the dind service below for the daemon.
+  # It is deliberately a DIFFERENT image than the service — docker:27 and
+  # docker:27-dind are the same full image (identical digest), so pinning both
+  # to it would read as a copy-paste error. docker:27-cli has no dockerd, which
+  # is exactly what a build job should not carry. (GitLab's docker executor
+  # detects the shell and falls back to sh; this image has sh, no bash.)
+  image: docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
   services: ["docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce"]
   variables:
     DOCKER_BUILDKIT: "1"
@@ -101,10 +115,15 @@ pp:image-scan:
   stage: scan
   # Digest-pinned, same image and command as the GitHub workflow. The trivy
   # image's entrypoint IS the tool; GitLab needs a shell to run script lines,
-  # so clear it (GitLab's documented trivy setup). No ignore file: a Go 1.27
-  # build embeds a stdlib with no known HIGH/CRITICAL CVEs, so the gate is
-  # fully real. (The trivy DB download is not cached: it's a few MB, and
-  # caching it would add a cache key to keep in sync for little gain.)
+  # so clear it (GitLab's documented trivy setup).
+  #
+  # No ignore file: the gate is fully real. trivy's Go scanner reports CVEs in
+  # the standard library embedded in a static binary, so this gate is only as
+  # clean as the toolchain that built the image (see GO_IMAGE above). If a
+  # future Go stdlib CVE lands and this starts failing, the fix is to bump Go,
+  # not to add a .trivyignore — an ignore file would make the gate decorative.
+  # (The trivy DB download is not cached: it's a few MB, and caching it would
+  # add a cache key to keep in sync for little gain.)
   image: aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
   entrypoint: [""]
   parallel:

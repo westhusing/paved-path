@@ -8,8 +8,18 @@
 name: ci
 on:
   pull_request:
+  # Pushes to main only (not every branch): a push to a feature branch that
+  # has an open PR would otherwise fire BOTH this and the pull_request event,
+  # running CI twice for the same commit. Feature branches get their runs from
+  # pull_request; main gets them here (direct pushes and merges).
   push:
-    branches: ['**']
+    branches: [main]
+
+# Least privilege for the workflow token. CI only reads the repo (checkout);
+# it never writes, comments, or mints tokens. The release workflow declares
+# its own (wider) permissions.
+permissions:
+  contents: read
 
 # One pipeline per branch at a time; a newer push supersedes the older one.
 concurrency:
@@ -24,10 +34,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: |
           wget -qO /tmp/actionlint.tgz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          # Verify the download before running it (same supply-chain stance as
+          # the cosign/syft installs in release.yml). Checksum verified against
+          # the v1.7.12 asset.
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tgz" | sha256sum -c -
           tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint
       # shellcheck is the same idea for the bash scripts.
       - run: |
           wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+          echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tgz" | sha256sum -c -
           tar -xJf /tmp/shellcheck.tgz -C /usr/local/bin --strip-components=1 shellcheck-v0.10.0/shellcheck
       # No args: actionlint finds every workflow under .github/workflows.
       - run: actionlint
