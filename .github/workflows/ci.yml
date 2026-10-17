@@ -68,6 +68,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: { go-version-file: go.mod }
+      # gofmt is a hard gate (same check as `make lint` and the GitLab pp:lint
+      # job): a non-empty list of unformatted files fails. gofmt ships with the
+      # Go toolchain, so no extra install.
+      - run: |
+          test -z "$(gofmt -l .)" || { echo 'unformatted (run: gofmt -w <file>)'; gofmt -l .; exit 1; }
       - run: go vet ./...
 
   test:
