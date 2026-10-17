@@ -46,19 +46,24 @@ build: ## build every service (reproducible flags)
 	  CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/$$s ./services/$$s || exit 1; \
 	done
 
-scan: ## vulnerability scan (govulncheck if present, else go vet)
+# CI's scan gate is govulncheck, so the local target must be too: falling
+# back to go vet would pass locally while CI still runs the real check.
+scan: ## vulnerability scan (govulncheck; run `make bootstrap` if missing)
 	@if command -v govulncheck >/dev/null; then \
 	  govulncheck ./...; \
 	else \
-	  go vet ./...; \
+	  echo "govulncheck not installed — run: make bootstrap"; exit 1; \
 	fi
 
 # Lint the CI config itself, locally. The workflow files are code; this runs
 # the same linters the actionlint job does (actionlint + shellcheck), so a
-# local pass predicts CI. The GitLab templates have no .gitlab-ci.yml to feed
-# `glab ci lint` (this repo IS the template), so it validates they parse as
-# YAML instead — the class of error that lint would catch. Comments live above
-# the target, not in the recipe: BSD make echoes in-recipe `#` lines.
+# local pass predicts CI. For the GitLab templates, `glab ci lint` can't run
+# (this repo IS the template — there is no .gitlab-ci.yml to feed it), so we
+# validate against GitLab's own CI schema with check-jsonschema. That catches
+# real config bugs a plain YAML parse misses — e.g. a bare top-level GO_IMAGE
+# (parsed as a job) or a job-level `entrypoint` (an imageable key, not a job
+# keyword). Without check-jsonschema it falls back to a YAML parse. Comments
+# live above the target, not in the recipe: BSD make echoes in-recipe `#`.
 ci-lint:
 	@if command -v actionlint >/dev/null; then \
 	  echo "==> actionlint"; actionlint .github/workflows/; \
@@ -70,12 +75,14 @@ ci-lint:
 	else \
 	  echo "shellcheck not installed (CI runs it); skipping"; \
 	fi
-	@if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then \
-	  echo "==> gitlab yaml"; python3 -c 'import glob,yaml; [yaml.safe_load(open(f)) for f in sorted(glob.glob(".gitlab/ci/*.yml"))]; print("ok")'; \
+	@if command -v check-jsonschema >/dev/null; then \
+	  echo "==> gitlab ci schema"; check-jsonschema --builtin-schema vendor.gitlab-ci .gitlab/ci/*.yml; \
+	elif command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then \
+	  echo "==> gitlab yaml (no check-jsonschema; parse only)"; python3 -c 'import glob,yaml; [yaml.safe_load(open(f)) for f in sorted(glob.glob(".gitlab/ci/*.yml"))]; print("ok")'; \
 	elif command -v ruby >/dev/null; then \
-	  echo "==> gitlab yaml"; ruby -ryaml -e 'Dir[".gitlab/ci/*.yml"].each{|f| YAML.load_file(f)}; puts "ok"'; \
+	  echo "==> gitlab yaml (no check-jsonschema; parse only)"; ruby -ryaml -e 'Dir[".gitlab/ci/*.yml"].each{|f| YAML.load_file(f)}; puts "ok"'; \
 	else \
-	  echo "no yaml parser (python3+yaml or ruby) found; skipping GitLab template check"; \
+	  echo "no yaml parser (check-jsonschema, python3+yaml, or ruby) found; skipping GitLab template check"; \
 	fi
 
 image: ## build one service image (make image SERVICE=billing)

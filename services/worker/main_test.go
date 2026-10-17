@@ -42,8 +42,9 @@ func (h *captureHandler) count(msg string) int {
 // The whole point of the shutdown path is that it must not deadlock: a worker
 // killed mid-job used to lose in-flight work, and the fix (stop producing,
 // wait for the producer's in-flight send to finish, close the queue, drain)
-// is only correct if each step actually completes. This runs that exact
-// sequence and fails on a hang instead of blocking the test forever.
+// is only correct if each step actually completes. This drives the real
+// shutdown function (the same one main calls) and fails on a hang instead of
+// blocking the test forever.
 func TestShutdownDrainsWithoutDeadlock(t *testing.T) {
 	h := &captureHandler{}
 	logger := slog.New(h)
@@ -66,10 +67,7 @@ func TestShutdownDrainsWithoutDeadlock(t *testing.T) {
 		close(stop)
 		<-runDone
 
-		close(stopProducing) // no new jobs
-		<-producerDone      // producer finished its in-flight send
-		close(queue)        // safe now: no more sends will happen
-		drain(queue, logger)
+		shutdown(queue, stopProducing, producerDone, logger) // the real function
 	}()
 
 	select {

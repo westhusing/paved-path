@@ -38,10 +38,18 @@ func main() {
 	}()
 
 	run(queue, stop, logger) // consume until the signal arrives
-	close(stopProducing)     // no new jobs
-	<-producerDone          // producer finished its in-flight send
-	close(queue)            // safe now: no more sends will happen
-	drain(queue, logger)    // process what's left, then return
+	shutdown(queue, stopProducing, producerDone, logger)
+}
+
+// shutdown stops the producer, waits for its in-flight send to finish, closes
+// the queue (safe: no more sends will happen), and drains what's left. Call it
+// after run returns, so closing the queue can't race a send. main and the tests
+// both call this one function — the shutdown path is not copied into a test.
+func shutdown(queue chan jobs.Job, stopProducing chan struct{}, producerDone <-chan struct{}, logger *slog.Logger) {
+	close(stopProducing) // no new jobs
+	<-producerDone      // producer finished its in-flight send
+	close(queue)        // safe now: no more sends will happen
+	drain(queue, logger) // process what's left, then return
 }
 
 // produce enqueues a job every interval until stop is closed. It selects on

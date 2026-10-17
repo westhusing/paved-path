@@ -56,6 +56,14 @@ pp:sign-release:
   id_tokens:
     SIGSTORE_ID_TOKEN:
       aud: sigstore
+  # Keyless verify constraints. cosign has no --yes on verify, and keyless mode
+  # requires identity + issuer. GitLab's Sigstore sub is the project path, ref
+  # type, and bare tag (claim names included, no refs/ prefix); the issuer is
+  # this instance's URL. The GitHub workflow pins its own (immutable) sub format
+  # — see .github/workflows/release.yml.
+  variables:
+    COSIGN_ISSUER: "https://gitlab.com"
+    COSIGN_IDENTITY_REGEX: '^project_path:westhusing/paved-path:ref_type:tag:ref:v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
   # Must run after promotion: we sign the tag that pp:release-image just
   # pushed. Without this, all release-stage jobs start in parallel and signing
   # races the push (flaky releases). Waiting for all promote instances is a
@@ -80,12 +88,19 @@ pp:sign-release:
   script:
     # Resolve the tag to its digest, then sign by digest. Fail loudly if we
     # can't resolve it — signing a tag we couldn't pin would be worse than no
-    # signature.
+    # signature. Then verify the signature (keyless): a sign that can't be
+    # verified is not a signature. Keyless mode needs the identity + issuer
+    # constraints (COSIGN_* above); there is no --yes on verify.
     - |-
       digest=$(docker buildx imagetools inspect "$CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG" 2>/dev/null | grep -m1 'Digest:' | awk '{print $2}')
       [ -n "$digest" ] || { echo "could not resolve digest for $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG"; exit 1; }
-      echo "signing $CI_REGISTRY_IMAGE/$SERVICE@$digest"
-      cosign sign --yes "$CI_REGISTRY_IMAGE/$SERVICE@$digest"
+      img="$CI_REGISTRY_IMAGE/$SERVICE@$digest"
+      echo "signing $img"
+      cosign sign --yes "$img"
+      cosign verify \
+        --certificate-oidc-issuer "$COSIGN_ISSUER" \
+        --certificate-identity-regexp "$COSIGN_IDENTITY_REGEX" \
+        "$img"
 
 pp:sbom:
   stage: release
@@ -97,6 +112,17 @@ pp:sbom:
   # Same ordering reason as pp:sign-release: the SBOM describes the promoted
   # tag, so it must exist first. (Quoted for the same YAML reason as above.)
   needs: ["pp:release-image"]
+  # cosign attest mints a keyless OIDC token to bind the SBOM to the image,
+  # same as cosign sign in pp:sign-release.
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  # Keyless verify constraints (same values as pp:sign-release; see there for
+  # why). cosign has no --yes on verify-attestation, and keyless mode requires
+  # identity + issuer.
+  variables:
+    COSIGN_ISSUER: "https://gitlab.com"
+    COSIGN_IDENTITY_REGEX: '^project_path:westhusing/paved-path:ref_type:tag:ref:v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
   parallel:
     matrix:
       - SERVICE: ["gateway", "billing", "worker"]
@@ -111,13 +137,29 @@ pp:sbom:
     - wget -qO /tmp/syft_checksums.txt https://github.com/anchore/syft/releases/download/v1.14.0/syft_1.14.0_checksums.txt
     - (cd /tmp && grep " syft_1.14.0_linux_amd64.tar.gz$" syft_checksums.txt | sha256sum -c -)
     - tar -xzf /tmp/syft_1.14.0_linux_amd64.tar.gz -C /usr/local/bin syft
+    # cosign binds the SBOM to the image (attest) and verifies it — same
+    # binary + checksum verification as pp:sign-release.
+    - wget -qO /tmp/cosign-linux-amd64 https://github.com/sigstore/cosign/releases/download/v2.4.0/cosign-linux-amd64
+    - wget -qO /tmp/cosign_checksums.txt https://github.com/sigstore/cosign/releases/download/v2.4.0/cosign_checksums.txt
+    - (cd /tmp && grep " cosign-linux-amd64$" cosign_checksums.txt | sha256sum -c -)
+    - install /tmp/cosign-linux-amd64 /usr/local/bin/cosign
   script:
     # SBOM for the digest, not the tag: the bill of materials should describe
-    # the exact bytes that shipped.
+    # the exact bytes that shipped. Then bind it to the image with a cosign
+    # attestation (keyless) and verify: an SBOM that is just an artifact file
+    # can be detached from the image; an attestation ties it to the exact
+    # digest in Rekor. Keyless mode needs identity + issuer (COSIGN_* above);
+    # there is no --yes on verify-attestation.
     - |-
       digest=$(docker buildx imagetools inspect "$CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG" 2>/dev/null | grep -m1 'Digest:' | awk '{print $2}')
       [ -n "$digest" ] || { echo "could not resolve digest for $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG"; exit 1; }
-      echo "generating SBOM for $CI_REGISTRY_IMAGE/$SERVICE@$digest"
-      syft image "$CI_REGISTRY_IMAGE/$SERVICE@$digest" --output spdx-json=release-$SERVICE-$CI_COMMIT_TAG.spdx.json
+      img="$CI_REGISTRY_IMAGE/$SERVICE@$digest"
+      echo "generating SBOM for $img"
+      syft image "$img" --output spdx-json=release-$SERVICE-$CI_COMMIT_TAG.spdx.json
+      cosign attest --predicate "release-$SERVICE-$CI_COMMIT_TAG.spdx.json" --type spdxjson --yes "$img"
+      cosign verify-attestation --type spdxjson \
+        --certificate-oidc-issuer "$COSIGN_ISSUER" \
+        --certificate-identity-regexp "$COSIGN_IDENTITY_REGEX" \
+        "$img"
   artifacts:
     paths: [release-*.spdx.json]

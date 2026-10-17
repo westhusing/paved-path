@@ -19,13 +19,21 @@ permissions:
   contents: read
   packages: write   # push/pull images on GHCR (image, image-scan, promote,
                     # sign, sbom all touch the registry)
-  # id-token: write is NOT here. Only the sign job needs it (cosign keyless
-  # signing mints a Sigstore OIDC token), so it is declared at that job's
-  # level below — least privilege, and a leaked workflow token can't mint OIDC
-  # tokens from the other jobs.
+  # id-token: write is NOT here. Only the sign and sbom jobs need it (cosign
+  # keyless signing, and cosign attest for the SBOM binding, each mint a
+  # Sigstore OIDC token), so it is declared at those jobs' level below — least
+  # privilege, and a leaked workflow token can't mint OIDC tokens from the
+  # other jobs.
 
 env:
   REGISTRY: ghcr.io
+  # Keyless verify constraints. cosign has no --yes on verify/verify-attestation,
+  # and keyless mode requires an identity + issuer. The sub is the immutable
+  # post-2026-07 format (owner@id/repo@id), pinned to this repo's IDs and the
+  # tag that triggered the run (same set as on.tags above). The GitLab workflow
+  # uses its own sub format — see .gitlab/ci/release.yml.
+  COSIGN_ISSUER: "https://token.actions.githubusercontent.com"
+  COSIGN_IDENTITY_REGEX: '^repo:westhusing@18428404/paved-path@1418363628:ref:refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
 
 jobs:
   lint:
@@ -60,8 +68,13 @@ jobs:
       # image was built from this exact commit; and with digest-pinned inputs a
       # rebuild would be byte-identical anyway. image-scan still validates what's
       # in the registry, so skipping the build doesn't skip the gate.
+      #
+      # GHCR image paths must be lowercase; a fork with an uppercase repo name
+      # would otherwise push to a path GHCR rejects. tr (not ${var,,}) so the
+      # same line works on a non-bash shell.
       - run: |
-          img="$REGISTRY/${{ github.repository }}/${{ matrix.service }}:$GITHUB_SHA"
+          REPO=$(printf '%s' "${{ github.repository }}" | tr A-Z a-z)
+          img="$REGISTRY/$REPO/${{ matrix.service }}:$GITHUB_SHA"
           if docker manifest inspect "$img" >/dev/null 2>&1; then
             echo "SHA image already in registry; skipping rebuild"
             exit 0
@@ -94,7 +107,8 @@ jobs:
       # ignore file: a Go 1.27 build embeds a stdlib with no known
       # HIGH/CRITICAL CVEs, so the gate is fully real.
       - run: |
-          img="$REGISTRY/${{ github.repository }}/${{ matrix.service }}:$GITHUB_SHA"
+          REPO=$(printf '%s' "${{ github.repository }}" | tr A-Z a-z)
+          img="$REGISTRY/$REPO/${{ matrix.service }}:$GITHUB_SHA"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             --entrypoint "" aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
@@ -111,15 +125,37 @@ jobs:
       # Promotion = retag the SHA image that passed build+scan, then push the
       # tag. No rebuild: the exact bytes that were tested are what ships.
       - run: |
-          img="$REGISTRY/${{ github.repository }}/${{ matrix.service }}"
+          REPO=$(printf '%s' "${{ github.repository }}" | tr A-Z a-z)
+          img="$REGISTRY/$REPO/${{ matrix.service }}"
           docker pull "$img:$GITHUB_SHA"
           docker tag  "$img:$GITHUB_SHA" "$img:${GITHUB_REF_NAME}"
           docker push "$img:${GITHUB_REF_NAME}"
 
-  sign:
+  # Re-scan the promoted TAG, not just the SHA image. The tag is what ships;
+  # scanning it (same trivy image/command as the CI gate) makes "what we ship
+  # is clean" explicit rather than inferred from an earlier scan of the same
+  # bytes. sign and sbom depend on this, so a dirty release fails before it is
+  # signed or given an SBOM.
+  release-scan:
     needs: [promote]
-    # The only job that mints an OIDC token, so id-token: write lives here,
-    # not at the workflow level (see permissions above).
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, billing, worker]
+    steps:
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin "$REGISTRY"
+      - run: |
+          REPO=$(printf '%s' "${{ github.repository }}" | tr A-Z a-z)
+          img="$REGISTRY/$REPO/${{ matrix.service }}:${GITHUB_REF_NAME}"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --entrypoint "" aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
+            "trivy image --exit-code 1 --severity HIGH,CRITICAL '$img'"
+
+  sign:
+    needs: [release-scan]
+    # id-token: write lives here (and on sbom), not at the workflow level
+    # (see permissions above): only these two jobs mint Sigstore OIDC tokens.
     permissions:
       contents: read
       packages: write
@@ -137,29 +173,87 @@ jobs:
       # built-in OIDC (permissions: id-token: write above); cosign picks it up
       # automatically on GitHub Actions.
       - run: |
+          REPO=$(printf '%s' "${{ github.repository }}" | tr A-Z a-z)
           wget -qO /tmp/cosign-linux-amd64 https://github.com/sigstore/cosign/releases/download/v2.4.0/cosign-linux-amd64
           wget -qO /tmp/cosign_checksums.txt https://github.com/sigstore/cosign/releases/download/v2.4.0/cosign_checksums.txt
           (cd /tmp && grep " cosign-linux-amd64$" cosign_checksums.txt | sha256sum -c -)
           install /tmp/cosign-linux-amd64 /usr/local/bin/cosign
-      - run: cosign sign --yes "$REGISTRY/${{ github.repository }}/${{ matrix.service }}:${GITHUB_REF_NAME}"
+      # Sign by DIGEST, not tag (same as the GitLab template): a signature on
+      # a tag is tied to whatever the tag points at; a signature on a digest is
+      # tied to the exact bytes that were promoted. Resolve with buildx
+      # imagetools (a remote registry op — no daemon needed on the runner),
+      # then verify the signature we just wrote (keyless, against Rekor): a
+      # sign that can't be verified is not a signature.
+      - run: |
+          REPO=$(printf '%s' "${{ github.repository }}" | tr A-Z a-z)
+          tag="$REGISTRY/$REPO/${{ matrix.service }}:${GITHUB_REF_NAME}"
+          digest=$(docker buildx imagetools inspect "$tag" 2>/dev/null | grep -m1 'Digest:' | awk '{print $2}')
+          [ -n "$digest" ] || { echo "could not resolve digest for $tag"; exit 1; }
+          img="$REGISTRY/$REPO/${{ matrix.service }}@$digest"
+          echo "signing $img"
+          cosign sign --yes "$img"
+          # Verify the signature we just wrote (keyless, against Rekor): a sign
+          # that can't be verified is not a signature. Keyless mode needs the
+          # identity + issuer constraints (COSIGN_* above); there is no --yes.
+          cosign verify \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_IDENTITY_REGEX" \
+            "$img"
 
   sbom:
-    needs: [promote]
+    needs: [release-scan]
+    # id-token: write here too (not just on sign): cosign attest mints a
+    # keyless OIDC token to bind the SBOM to the image, same as cosign sign.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # cosign attest (keyless, Sigstore OIDC)
     runs-on: ubuntu-latest
     strategy:
       matrix:
         service: [gateway, billing, worker]
     steps:
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin "$REGISTRY"
-      # Same syft version as the GitLab template. Official static binary,
-      # verified against the release's own checksums file: `go install`
-      # rejects syft v1.14.0 (replace directive in its go.mod).
+      # syft generates the SBOM; cosign binds it to the image (attest) and
+      # verifies the binding. Both are official static binaries verified
+      # against their releases' own checksums files: `go install` rejects syft
+      # v1.14.0 (replace directive in its go.mod), and the official images
+      # have no shell, so both use binaries to stay in lockstep with GitLab.
       - run: |
           wget -qO /tmp/syft_1.14.0_linux_amd64.tar.gz https://github.com/anchore/syft/releases/download/v1.14.0/syft_1.14.0_linux_amd64.tar.gz
           wget -qO /tmp/syft_checksums.txt https://github.com/anchore/syft/releases/download/v1.14.0/syft_1.14.0_checksums.txt
           (cd /tmp && grep " syft_1.14.0_linux_amd64.tar.gz$" syft_checksums.txt | sha256sum -c -)
           tar -xzf /tmp/syft_1.14.0_linux_amd64.tar.gz -C /usr/local/bin syft
-      - run: syft image "$REGISTRY/${{ github.repository }}/${{ matrix.service }}:${GITHUB_REF_NAME}" --output spdx-json="sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json"
+          wget -qO /tmp/cosign-linux-amd64 https://github.com/sigstore/cosign/releases/download/v2.4.0/cosign-linux-amd64
+          wget -qO /tmp/cosign_checksums.txt https://github.com/sigstore/cosign/releases/download/v2.4.0/cosign_checksums.txt
+          (cd /tmp && grep " cosign-linux-amd64$" cosign_checksums.txt | sha256sum -c -)
+          install /tmp/cosign-linux-amd64 /usr/local/bin/cosign
+      # SBOM for the digest, not the tag: the bill of materials should describe
+      # the exact bytes that shipped (same digest resolution as sign).
+      - run: |
+          REPO=$(printf '%s' "${{ github.repository }}" | tr A-Z a-z)
+          tag="$REGISTRY/$REPO/${{ matrix.service }}:${GITHUB_REF_NAME}"
+          digest=$(docker buildx imagetools inspect "$tag" 2>/dev/null | grep -m1 'Digest:' | awk '{print $2}')
+          [ -n "$digest" ] || { echo "could not resolve digest for $tag"; exit 1; }
+          img="$REGISTRY/$REPO/${{ matrix.service }}@$digest"
+          echo "generating SBOM for $img"
+          syft image "$img" --output spdx-json="sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json"
+      # Bind the SBOM to the image with a cosign attestation (keyless), then
+      # verify it. An SBOM that is just an artifact file can be detached from
+      # the image; an attestation ties it to the exact digest in Rekor.
+      - run: |
+          REPO=$(printf '%s' "${{ github.repository }}" | tr A-Z a-z)
+          tag="$REGISTRY/$REPO/${{ matrix.service }}:${GITHUB_REF_NAME}"
+          digest=$(docker buildx imagetools inspect "$tag" 2>/dev/null | grep -m1 'Digest:' | awk '{print $2}')
+          [ -n "$digest" ] || { echo "could not resolve digest for $tag"; exit 1; }
+          img="$REGISTRY/$REPO/${{ matrix.service }}@$digest"
+          cosign attest --predicate "sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json" --type spdxjson --yes "$img"
+          # Verify the attestation (keyless). Same identity + issuer constraints
+          # as sign; there is no --yes on verify-attestation either.
+          cosign verify-attestation --type spdxjson \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_IDENTITY_REGEX" \
+            "$img"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom-${{ matrix.service }}

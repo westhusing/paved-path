@@ -117,6 +117,14 @@ pp:image-scan:
   # image's entrypoint IS the tool; GitLab needs a shell to run script lines,
   # so clear it (GitLab's documented trivy setup).
   #
+  # entrypoint lives INSIDE the object-form image, not at job level: GitLab's
+  # valid job keywords don't include a bare `entrypoint` (it's an imageable
+  # key, like name/ports/pull_policy). A job-level one is silently ignored,
+  # which leaves trivy's own entrypoint in place and the script runs as
+  # `trivy <shell> ...` — a failure that only shows up at runtime, not in the
+  # YAML. (The runner's overwriteEntrypoint returns nil when no image-level
+  # entrypoint is set, so the image default wins.)
+  #
   # No ignore file: the gate is fully real. trivy's Go scanner reports CVEs in
   # the standard library embedded in a static binary, so this gate is only as
   # clean as the toolchain that built the image (see GO_IMAGE above). If a
@@ -124,8 +132,9 @@ pp:image-scan:
   # not to add a .trivyignore — an ignore file would make the gate decorative.
   # (The trivy DB download is not cached: it's a few MB, and caching it would
   # add a cache key to keep in sync for little gain.)
-  image: aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
-  entrypoint: [""]
+  image:
+    name: aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
+    entrypoint: [""]
   parallel:
     matrix:
       - SERVICE: ["gateway", "billing", "worker"]

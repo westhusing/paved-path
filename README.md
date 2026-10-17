@@ -56,14 +56,11 @@ Every environment runs the exact artifact that was tested. "Rebuild it for
 prod" is how bits change between staging and production.
 
 **Local and CI run the same commands.**
-The Makefile is the local entry point; the pipelines don't call `make`, they
-run the same commands directly — go vet, go test -race, docker build with the
-shared Dockerfile, govulncheck and trivy at the same pinned versions. Same
-commands, no Makefile dependency in CI. The one gate with no `make` target is
-the trivy image scan, on purpose: scanning a built image is a pipeline and
-release concern, not part of the dev loop. The point stands: if a rule is real,
-the local target and the pipeline job run the same check, so developers meet it
-before their PR — not for the first time on review.
+The pipelines don't call `make`; they run the same checks directly — go vet,
+go test -race, govulncheck and trivy at the same pinned versions — so a gate
+you pass locally is the one CI checks. The trivy image scan has no `make`
+target on purpose: scanning a built image is a pipeline concern, not part of
+the dev loop.
 
 **The Go version is part of the image policy.**
 The image scan gate (HIGH/CRITICAL, no ignore file) is only as clean as the
