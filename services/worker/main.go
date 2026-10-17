@@ -47,8 +47,8 @@ func main() {
 // both call this one function — the shutdown path is not copied into a test.
 func shutdown(queue chan jobs.Job, stopProducing chan struct{}, producerDone <-chan struct{}, logger *slog.Logger) {
 	close(stopProducing) // no new jobs
-	<-producerDone      // producer finished its in-flight send
-	close(queue)        // safe now: no more sends will happen
+	<-producerDone       // producer finished its in-flight send
+	close(queue)         // safe now: no more sends will happen
 	drain(queue, logger) // process what's left, then return
 }
 

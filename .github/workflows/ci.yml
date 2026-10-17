@@ -47,6 +47,20 @@ jobs:
       # No args: actionlint finds every workflow under .github/workflows.
       - run: actionlint
       - run: shellcheck scripts/*.sh
+      # The GitLab templates are included from a root .gitlab-ci.yml this repo
+      # doesn't have (this repo IS the template), so `glab ci lint` can't run
+      # here. Validate them against GitLab's own CI schema instead — the same
+      # check `make ci-lint` runs locally. This catches config bugs a plain YAML
+      # parse misses (e.g. a job-level `entrypoint`, which GitLab silently
+      # ignores). check-jsonschema is pinned because its bundled vendor.gitlab-ci
+      # schema changes between versions; the pin keeps CI and a fresh local run
+      # on the same schema. Installed in a throwaway venv so it works on PEP 668
+      # (externally-managed) runners. Same "install from a trusted registry"
+      # stance as the govulncheck install in the scan job.
+      - run: |
+          python3 -m venv /tmp/cjs
+          /tmp/cjs/bin/pip install --quiet check-jsonschema==0.38.2
+          /tmp/cjs/bin/check-jsonschema --builtin-schema vendor.gitlab-ci .gitlab/ci/*.yml
 
   lint:
     runs-on: ubuntu-latest

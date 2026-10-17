@@ -28,12 +28,14 @@ permissions:
 env:
   REGISTRY: ghcr.io
   # Keyless verify constraints. cosign has no --yes on verify/verify-attestation,
-  # and keyless mode requires an identity + issuer. The sub is the immutable
-  # post-2026-07 format (owner@id/repo@id), pinned to this repo's IDs and the
-  # tag that triggered the run (same set as on.tags above). The GitLab workflow
-  # uses its own sub format — see .gitlab/ci/release.yml.
+  # and keyless mode requires an identity + issuer. The identity is the signing
+  # certificate's URI SAN — NOT the OIDC sub claim. Fulcio builds that SAN from
+  # the job_workflow_ref claim as https://github.com/<owner>/<repo>/.github/
+  # workflows/release.yml@<ref>, so we reconstruct it from github.repository +
+  # github.ref (no hardcoded owner/repo/IDs — a copied template works in any
+  # repo). The issuer is fixed for GitHub Actions. GitLab builds its SAN a
+  # different way — see .gitlab/ci/release.yml.
   COSIGN_ISSUER: "https://token.actions.githubusercontent.com"
-  COSIGN_IDENTITY_REGEX: '^repo:westhusing@18428404/paved-path@1418363628:ref:refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
 
 jobs:
   lint:
@@ -131,29 +133,12 @@ jobs:
           docker tag  "$img:$GITHUB_SHA" "$img:${GITHUB_REF_NAME}"
           docker push "$img:${GITHUB_REF_NAME}"
 
-  # Re-scan the promoted TAG, not just the SHA image. The tag is what ships;
-  # scanning it (same trivy image/command as the CI gate) makes "what we ship
-  # is clean" explicit rather than inferred from an earlier scan of the same
-  # bytes. sign and sbom depend on this, so a dirty release fails before it is
-  # signed or given an SBOM.
-  release-scan:
-    needs: [promote]
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        service: [gateway, billing, worker]
-    steps:
-      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin "$REGISTRY"
-      - run: |
-          REPO=$(printf '%s' "${{ github.repository }}" | tr A-Z a-z)
-          img="$REGISTRY/$REPO/${{ matrix.service }}:${GITHUB_REF_NAME}"
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            --entrypoint "" aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
-            "trivy image --exit-code 1 --severity HIGH,CRITICAL '$img'"
-
+  # No separate "release-scan" of the promoted tag: the tag is a retag of the
+  # SHA image that image-scan already scanned, so it is the same bytes — a second
+  # scan would add no information. GitLab has no such job either, so the two
+  # platforms stay in lockstep (see .gitlab/ci/release.yml).
   sign:
-    needs: [release-scan]
+    needs: [promote]
     # id-token: write lives here (and on sbom), not at the workflow level
     # (see permissions above): only these two jobs mint Sigstore OIDC tokens.
     permissions:
@@ -194,14 +179,16 @@ jobs:
           cosign sign --yes "$img"
           # Verify the signature we just wrote (keyless, against Rekor): a sign
           # that can't be verified is not a signature. Keyless mode needs the
-          # identity + issuer constraints (COSIGN_* above); there is no --yes.
+          # identity + issuer constraints; there is no --yes on verify. The
+          # identity is the cert's URI SAN (see COSIGN_ISSUER comment above),
+          # reconstructed from github.repository + github.ref.
           cosign verify \
             --certificate-oidc-issuer "$COSIGN_ISSUER" \
-            --certificate-identity-regexp "$COSIGN_IDENTITY_REGEX" \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}" \
             "$img"
 
   sbom:
-    needs: [release-scan]
+    needs: [promote]
     # id-token: write here too (not just on sign): cosign attest mints a
     # keyless OIDC token to bind the SBOM to the image, same as cosign sign.
     permissions:
@@ -252,7 +239,7 @@ jobs:
           # as sign; there is no --yes on verify-attestation either.
           cosign verify-attestation --type spdxjson \
             --certificate-oidc-issuer "$COSIGN_ISSUER" \
-            --certificate-identity-regexp "$COSIGN_IDENTITY_REGEX" \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}" \
             "$img"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
