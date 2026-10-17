@@ -33,7 +33,12 @@ test: ## run all tests (all services)
 race: ## race-detector pass (needs cgo; CI runs this on every commit)
 	CGO_ENABLED=1 go test -race ./...
 
-lint: ## static checks (golangci-lint if present, else go vet)
+# gofmt is a hard gate, not just golangci-lint's opinion of it: `gofmt -l` lists
+# any file whose formatting differs, and a non-empty list fails. CI runs the same
+# check (see .github/workflows/ci.yml and .gitlab/ci/base.yml), so a local pass
+# predicts CI. gofmt is part of the Go toolchain, so no extra install.
+lint: ## static checks (gofmt, then golangci-lint if present else go vet)
+	@test -z "$$(gofmt -l .)" || { echo "unformatted (run: gofmt -w <file>):"; gofmt -l .; exit 1; }
 	@if command -v golangci-lint >/dev/null; then \
 	  golangci-lint run; \
 	else \
