@@ -26,11 +26,11 @@ func Run(log *slog.Logger, name string, h http.Handler) error {
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           h,
-		ReadHeaderTimeout: 5 * time.Second, // slowloris: bound the request headers
+		ReadHeaderTimeout: 5 * time.Second,  // slowloris: bound the request headers
 		ReadTimeout:       15 * time.Second, // whole read (headers + body)
 		WriteTimeout:      20 * time.Second, // whole write; kept > ReadTimeout so a
-		                   // slow read can't eat into the response budget
-		IdleTimeout:       60 * time.Second, // keep-alive connections
+		// slow read can't eat into the response budget
+		IdleTimeout: 60 * time.Second, // keep-alive connections
 	}
 
 	errCh := make(chan error, 1)
