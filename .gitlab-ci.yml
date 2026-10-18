@@ -1,0 +1,20 @@
+# Root GitLab CI config. This repo is the paved-path template, and these two
+# files are the templates — but they only run if something includes them. This
+# is that something: it makes the templates execute in this repo's own pipeline,
+# which is how they get exercised (a template that has never run is a guess).
+#
+# Everything else — stages, jobs, the tag-only release rule — lives in the two
+# included files. base.yml owns lint/test/build/scan; release.yml owns the
+# tag-only promote/sign/sbom jobs. No variables are set here: base.yml defines
+# its own (GO_IMAGE, GOVULNCHECK_VERSION) and the release jobs use GitLab
+# built-ins (CI_REGISTRY*, CI_SERVER_URL, CI_CONFIG_REF_URI).
+include:
+  - .gitlab/ci/base.yml
+  - .gitlab/ci/release.yml
+
+# Instance-level prerequisites (not expressible in this file):
+#   - A runner with Docker-in-Docker for the build/scan/release jobs.
+#   - OIDC/Sigstore enabled for keyless signing (Settings > CI/CD > "Use
+#     instance-level OIDC" / auto device authentication), so pp:sign-release and
+#     pp:sbom can mint a Sigstore token via id_tokens.
+#   - GitLab 19.0+ for CI_CONFIG_REF_URI (the release jobs fail loudly below it).

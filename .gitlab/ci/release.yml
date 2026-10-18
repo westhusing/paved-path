@@ -83,6 +83,14 @@ pp:sign-release:
     # signature. Then verify the signature (keyless): a sign that can't be
     # verified is not a signature. There is no --yes on verify.
     - |-
+      # CI_CONFIG_REF_URI (GitLab 19.0+) is the exact claim Fulcio uses for the
+      # cert SAN; on older GitLab it's empty and "https://" alone would make
+      # cosign verify fail with a confusing mismatch. Fail loudly instead. We
+      # don't fall back to reconstructing it from CI_SERVER_URL/CI_PROJECT_PATH/
+      # CI_CONFIG_PATH: those could subtly differ from Fulcio's build_server_
+      # fqdn/full_path/ci_config, and a subtle mismatch is exactly the confusing
+      # error we're avoiding.
+      [ -n "$CI_CONFIG_REF_URI" ] || { echo "needs GitLab 19.0+ (CI_CONFIG_REF_URI)"; exit 1; }
       digest=$(docker buildx imagetools inspect "$CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG" 2>/dev/null | grep -m1 'Digest:' | awk '{print $2}')
       [ -n "$digest" ] || { echo "could not resolve digest for $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG"; exit 1; }
       img="$CI_REGISTRY_IMAGE/$SERVICE@$digest"
@@ -142,6 +150,9 @@ pp:sbom:
     # digest in Rekor. Keyless mode needs identity + issuer (COSIGN_* above);
     # there is no --yes on verify-attestation.
     - |-
+      # Same GitLab 19.0+ guard as pp:sign-release (see there for why we don't
+      # fall back to reconstructing CI_CONFIG_REF_URI from other variables).
+      [ -n "$CI_CONFIG_REF_URI" ] || { echo "needs GitLab 19.0+ (CI_CONFIG_REF_URI)"; exit 1; }
       digest=$(docker buildx imagetools inspect "$CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG" 2>/dev/null | grep -m1 'Digest:' | awk '{print $2}')
       [ -n "$digest" ] || { echo "could not resolve digest for $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_TAG"; exit 1; }
       img="$CI_REGISTRY_IMAGE/$SERVICE@$digest"
