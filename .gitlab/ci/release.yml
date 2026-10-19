@@ -159,7 +159,10 @@ pp:sbom:
       echo "generating SBOM for $img"
       # syft v1.14.0 has no `image` subcommand (removed in favor of the unified
       # `scan`) — see the GitHub sbom job for why. Same binary + version there.
-      syft scan "$img" --output spdx-json=release-$SERVICE-$CI_COMMIT_TAG.spdx.json
+      # registry: prefix = pull from the registry (reads ~/.docker/config.json,
+      # written by docker login above) instead of a local daemon. This is why
+      # this job takes ~25s here vs 26-30 min on GitHub's runners.
+      syft scan "registry:$img" --output spdx-json=release-$SERVICE-$CI_COMMIT_TAG.spdx.json
       cosign attest --predicate "release-$SERVICE-$CI_COMMIT_TAG.spdx.json" --type spdxjson --yes "$img"
       # Verify the attestation (keyless). Same identity + issuer as
       # pp:sign-release — see there for why $CI_CONFIG_REF_URI / $CI_SERVER_URL.

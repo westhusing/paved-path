@@ -138,6 +138,9 @@ pp:image-scan:
   # (The trivy DB download is not cached: it's a few MB, and caching it would
   # add a cache key to keep in sync for little gain.)
   image:
+    # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
+    # (a re-push of :0.53.0 would silently swap the scanner), so only the
+    # digest is a stable pin.
     name: aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
     entrypoint: [""]
   parallel:
@@ -150,3 +153,34 @@ pp:image-scan:
     TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
   script:
     - trivy image --exit-code 1 --severity HIGH,CRITICAL $CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHA
+
+# Scheduled rescan of the latest STABLE release. The tag pipeline scans the
+# image at release time, but a new CVE lands in trivy's DB after that — this
+# re-runs the same gate (same image, command, severity) against the released
+# tag on a schedule, so a shipped release is re-checked as the DB updates.
+# Mirrors pp:image-scan exactly; only the ref (latest stable tag, not
+# $CI_COMMIT_SHA) and the trigger differ. The trivy image is Alpine with git,
+# so resolving the tag needs no extra install.
+pp:rescan-latest-release:
+  stage: scan
+  image:
+    name: aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
+    entrypoint: [""]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  parallel:
+    matrix:
+      - SERVICE: ["gateway", "billing", "worker"]
+  variables:
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
+  script:
+    - |
+      git fetch --tags --depth=1 origin
+      # Stable tags only: exactly the release regex minus the -rc.N form (see
+      # .gitlab/ci/release.yml). Anchored, so v1.2.3-rc.1 and any other suffix
+      # are excluded, not just "contains -rc".
+      tag=$(git tag --list | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+      [ -n "$tag" ] || { echo "no stable release tag found; nothing to rescan"; exit 0; }
+      echo "rescanning $CI_REGISTRY_IMAGE/$SERVICE:$tag"
+      trivy image --exit-code 1 --severity HIGH,CRITICAL $CI_REGISTRY_IMAGE/$SERVICE:$tag

@@ -45,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with: { go-version-file: go.mod }
+        with: { go-version-file: go.mod, cache: false }
       - run: go vet ./...
 
   test:
@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with: { go-version-file: go.mod }
+        with: { go-version-file: go.mod, cache: false }
       - run: go test ./...
       - run: CGO_ENABLED=1 go test -race ./...
 
@@ -92,7 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with: { go-version-file: go.mod }
+        with: { go-version-file: go.mod, cache: false }
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - run: govulncheck ./...
 
@@ -110,6 +110,9 @@ jobs:
       # $REGISTRY/$GITHUB_SHA are not set inside the trivy container. No
       # ignore file: a Go 1.27 build embeds a stdlib with no known
       # HIGH/CRITICAL CVEs, so the gate is fully real.
+      # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
+      # (a re-push of :0.53.0 would silently swap the scanner), so only the
+      # digest is a stable pin.
       - run: |
           REPO=$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           img="$REGISTRY/$REPO/${{ matrix.service }}:$GITHUB_SHA"
@@ -199,6 +202,10 @@ jobs:
       packages: write
       id-token: write   # cosign attest (keyless, Sigstore OIDC)
     runs-on: ubuntu-latest
+    # syft scan of a registry image is the slow step (26-30 min on GitHub's
+    # runners vs ~25s on GitLab). Cap it so a hung scan fails fast instead of
+    # burning the whole job's default 360-min timeout.
+    timeout-minutes: 10
     strategy:
       matrix:
         service: [gateway, billing, worker]
@@ -230,8 +237,11 @@ jobs:
           # syft v1.14.0 has no `image` subcommand — it was removed in favor of
           # the unified `scan` (handles images/files/dirs). `syft image <ref>`
           # fails with "accepts at most 1 arg(s), received 2". Verified against
-          # the v1.14.0 binary.
-          syft scan "$img" --output spdx-json="sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json"
+          # the v1.14.0 binary. The registry: prefix tells syft to pull from
+          # the registry (it reads ~/.docker/config.json for auth) instead of a
+          # local daemon — the same command GitLab runs at ~25s, which is what
+          # makes this fast and keeps the two platforms in lockstep.
+          syft scan "registry:$img" --output spdx-json="sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json"
       # Bind the SBOM to the image with a cosign attestation (keyless), then
       # verify it. An SBOM that is just an artifact file can be detached from
       # the image; an attestation ties it to the exact digest in Rekor.
