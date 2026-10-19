@@ -14,7 +14,9 @@ include:
 
 # Instance-level prerequisites (not expressible in this file):
 #   - A runner with Docker-in-Docker for the build/scan/release jobs.
-#   - OIDC/Sigstore enabled for keyless signing (Settings > CI/CD > "Use
-#     instance-level OIDC" / auto device authentication), so pp:sign-release and
-#     pp:sbom can mint a Sigstore token via id_tokens.
+#   - Keyless signing (Sigstore) is built into GitLab.com on the Free tier and
+#     above — there is no toggle to enable. pp:sign-release and pp:sbom declare
+#     id_tokens (aud: sigstore); GitLab sets SIGSTORE_ID_TOKEN and cosign picks
+#     it up automatically. (Self-managed instances need OIDC/Sigstore configured
+#     instead — see doc/ci/yaml/signing_self_hosted.md.)
 #   - GitLab 19.0+ for CI_CONFIG_REF_URI (the release jobs fail loudly below it).
