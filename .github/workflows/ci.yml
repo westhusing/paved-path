@@ -67,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with: { go-version-file: go.mod }
+        with: { go-version-file: go.mod, cache: false }
       # gofmt is a hard gate (same check as `make lint` and the GitLab pp:lint
       # job): a non-empty list of unformatted files fails. gofmt ships with the
       # Go toolchain, so no extra install.
@@ -80,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with: { go-version-file: go.mod }
+        with: { go-version-file: go.mod, cache: false }
       - run: go test ./...
       # Race detector on every commit. ubuntu-latest has a C toolchain, so no
       # extra setup; the GitLab job installs build-base for the same gate.
@@ -107,6 +107,9 @@ jobs:
       # (bash) and passed in single quotes, because $GITHUB_SHA is not set
       # inside the trivy container. No ignore file: a Go 1.27 build embeds a
       # stdlib with no known HIGH/CRITICAL CVEs, so the gate is fully real.
+      # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
+      # (a re-push of :0.53.0 would silently swap the scanner), so only the
+      # digest is a stable pin.
       - run: |
           img="paved-path/${{ matrix.service }}:${GITHUB_SHA}"
           docker run --rm \
@@ -119,7 +122,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with: { go-version-file: go.mod }
+        with: { go-version-file: go.mod, cache: false }
       # Pinned, not @latest (see Makefile). v1.9.0 requires Go >= 1.26;
       # go.mod declares 1.27, so setup-go above already satisfies it.
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0

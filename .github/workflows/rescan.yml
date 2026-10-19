@@ -1,0 +1,54 @@
+# Scheduled rescan of the latest stable release (GitHub Actions). Mirrors
+# .gitlab/ci/base.yml pp:rescan-latest-release: the tag pipeline scans each
+# image at release time, but a new CVE lands in trivy's DB after that — this
+# re-runs the same gate (same trivy image, command, severity) against the
+# released tag on a schedule, so a shipped release is re-checked as the DB
+# updates. Only the registry/auth differ (GHCR vs GitLab's registry).
+
+name: rescan
+on:
+  schedule:
+    # Daily at 06:00 UTC. A new trivy DB (and thus a new CVE) can land any
+    # day, so daily is the cadence that keeps a released image honest.
+    - cron: '0 6 * * *'
+  # Manual trigger so a rescan can be run on demand (e.g. right after a
+  # notable CVE is published) without waiting for the schedule.
+  workflow_dispatch: {}
+
+# Least privilege: rescan only reads (pulls) the released images from GHCR.
+permissions:
+  packages: read
+
+jobs:
+  rescan-latest-release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, billing, worker]
+    env:
+      # trivy pulls the released image from GHCR directly (no local build), so
+      # auth goes through trivy's own env vars — the same mechanism as the
+      # GitLab job. GHCR accepts any username with a token as the password;
+      # github.actor + GITHUB_TOKEN is what every other job uses for docker login.
+      TRIVY_USERNAME: ${{ github.actor }}
+      TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }   # need all tags to find the latest stable one
+      - run: |
+          # Stable tags only: exactly the release regex minus the -rc.N form
+          # (see release.yml). Anchored, so v1.2.3-rc.1 and any other suffix
+          # are excluded, not just "contains -rc". Same filter as the GitLab job.
+          tag=$(git tag --list | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          [ -n "$tag" ] || { echo "no stable release tag found; nothing to rescan"; exit 0; }
+          # GHCR image paths must be lowercase (same tr as the other jobs).
+          REPO=$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "rescanning ghcr.io/$REPO/${{ matrix.service }}:$tag"
+          # Same trivy image + command as the release-time scan (release.yml /
+          # GitLab pp:image-scan). Digest = trivy v0.53.0 (pinned by digest;
+          # tags are mutable, so only the digest is a stable pin). No docker
+          # socket: trivy pulls from GHCR itself, using TRIVY_USERNAME/PASSWORD.
+          docker run --rm \
+            -e TRIVY_USERNAME="$TRIVY_USERNAME" -e TRIVY_PASSWORD="$TRIVY_PASSWORD" \
+            --entrypoint "" aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
+            "trivy image --exit-code 1 --severity HIGH,CRITICAL ghcr.io/$REPO/${{ matrix.service }}:$tag"
