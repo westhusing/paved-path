@@ -241,7 +241,12 @@ jobs:
           # the registry (it reads ~/.docker/config.json for auth) instead of a
           # local daemon — the same command GitLab runs at ~25s, which is what
           # makes this fast and keeps the two platforms in lockstep.
+          # TIMING markers (date, not $SECONDS — each step is a fresh shell):
+          # this job timed out at 10 min on GitHub's runners while the identical
+          # GitLab job takes ~25s, so these localize which step eats the time.
+          echo "TIMING $(date -u +%H:%M:%S) before-syft"
           syft scan "registry:$img" --output spdx-json="sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json"
+          echo "TIMING $(date -u +%H:%M:%S) after-syft"
       # Bind the SBOM to the image with a cosign attestation (keyless), then
       # verify it. An SBOM that is just an artifact file can be detached from
       # the image; an attestation ties it to the exact digest in Rekor.
@@ -251,13 +256,16 @@ jobs:
           digest=$(docker buildx imagetools inspect "$tag" 2>/dev/null | grep -m1 'Digest:' | awk '{print $2}')
           [ -n "$digest" ] || { echo "could not resolve digest for $tag"; exit 1; }
           img="$REGISTRY/$REPO/${{ matrix.service }}@$digest"
+          echo "TIMING $(date -u +%H:%M:%S) before-attest"
           cosign attest --predicate "sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json" --type spdxjson --yes "$img"
+          echo "TIMING $(date -u +%H:%M:%S) after-attest"
           # Verify the attestation (keyless). Same identity + issuer constraints
           # as sign; there is no --yes on verify-attestation either.
           cosign verify-attestation --type spdxjson \
             --certificate-oidc-issuer "$COSIGN_ISSUER" \
             --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
             "$img"
+          echo "TIMING $(date -u +%H:%M:%S) after-verify"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom-${{ matrix.service }}
