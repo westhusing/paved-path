@@ -162,8 +162,15 @@ pp:sbom:
       # registry: prefix = pull from the registry (reads ~/.docker/config.json,
       # written by docker login above) instead of a local daemon. This is why
       # this job takes ~25s here vs 26-30 min on GitHub's runners.
+      # TIMING markers (date, not $SECONDS — each step is a fresh shell): the
+      # same job times out at 10 min on GitHub's runners, so these localize
+      # which step eats the time. Kept in lockstep with the GitHub sbom job.
+      echo "TIMING $(date -u +%H:%M:%S) before-syft"
       syft scan "registry:$img" --output spdx-json=release-$SERVICE-$CI_COMMIT_TAG.spdx.json
+      echo "TIMING $(date -u +%H:%M:%S) after-syft"
+      echo "TIMING $(date -u +%H:%M:%S) before-attest"
       cosign attest --predicate "release-$SERVICE-$CI_COMMIT_TAG.spdx.json" --type spdxjson --yes "$img"
+      echo "TIMING $(date -u +%H:%M:%S) after-attest"
       # Verify the attestation (keyless). Same identity + issuer as
       # pp:sign-release — see there for why $CI_CONFIG_REF_URI / $CI_SERVER_URL.
       # There is no --yes on verify-attestation either.
@@ -171,5 +178,6 @@ pp:sbom:
         --certificate-oidc-issuer "$CI_SERVER_URL" \
         --certificate-identity "https://$CI_CONFIG_REF_URI" \
         "$img"
+      echo "TIMING $(date -u +%H:%M:%S) after-verify"
   artifacts:
     paths: [release-*.spdx.json]
