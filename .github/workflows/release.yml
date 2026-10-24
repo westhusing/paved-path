@@ -202,10 +202,13 @@ jobs:
       packages: write
       id-token: write   # cosign attest (keyless, Sigstore OIDC)
     runs-on: ubuntu-latest
-    # syft scan of a registry image is the slow step (26-30 min on GitHub's
-    # runners vs ~25s on GitLab). Cap it so a hung scan fails fast instead of
-    # burning the whole job's default 360-min timeout.
-    timeout-minutes: 10
+    # syft scan is the slow step on GitHub's runners: rc.1 and rc.3 (the last
+    # two green releases) took 19-28 min for this job, vs ~25s on GitLab. The
+    # cap must sit above that observed max or the job times out mid-scan — a
+    # 10-min cap did exactly that on rc.5/rc.7. 40 min leaves headroom over the
+    # worst observed run (28 min) while still failing a truly hung scan in an
+    # hour, not the default 360.
+    timeout-minutes: 40
     strategy:
       matrix:
         service: [gateway, billing, worker]
@@ -237,15 +240,17 @@ jobs:
           # syft v1.14.0 has no `image` subcommand — it was removed in favor of
           # the unified `scan` (handles images/files/dirs). `syft image <ref>`
           # fails with "accepts at most 1 arg(s), received 2". Verified against
-          # the v1.14.0 binary. The registry: prefix tells syft to pull from
-          # the registry (it reads ~/.docker/config.json for auth) instead of a
-          # local daemon — the same command GitLab runs at ~25s, which is what
-          # makes this fast and keeps the two platforms in lockstep.
+          # the v1.14.0 binary. No registry: prefix here (unlike GitLab): a bare
+          # ref makes syft use the runner's local daemon, which is what rc.1 and
+          # rc.3 completed with (19-28 min). The registry: prefix was tried on
+          # rc.5/rc.7 and did not speed it up — the job still hit the timeout,
+          # so we're back to the proven daemon form. GitLab keeps registry:
+          # because its job has no daemon (docker:27-cli image).
           # TIMING markers (date, not $SECONDS — each step is a fresh shell):
-          # this job timed out at 10 min on GitHub's runners while the identical
-          # GitLab job takes ~25s, so these localize which step eats the time.
+          # this job's ~25 min on GitHub is unexplained (the image is 3.4 MB),
+          # so these localize which step eats the time on the next run.
           echo "TIMING $(date -u +%H:%M:%S) before-syft"
-          syft scan "registry:$img" --output spdx-json="sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json"
+          syft scan "$img" --output spdx-json="sbom-${{ matrix.service }}-${GITHUB_REF_NAME}.spdx.json"
           echo "TIMING $(date -u +%H:%M:%S) after-syft"
       # Bind the SBOM to the image with a cosign attestation (keyless), then
       # verify it. An SBOM that is just an artifact file can be detached from
