@@ -34,6 +34,13 @@ variables:
 
 pp:lint:
   stage: lint
+  # Skip on the daily schedule pipeline — it should only run
+  # pp:rescan-latest-release, not rebuild/re-scan main. The on_success
+  # catch-all keeps this running on branch and tag pipelines.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
   image: $GO_IMAGE
   script:
     # gofmt is a hard gate (same check as `make lint` and the GitHub lint job):
@@ -50,6 +57,11 @@ pp:lint:
 # runners are; on an arm64 runner, swap in the .linux.aarch64 asset.
 pp:shellcheck:
   stage: lint
+  # Skip on the daily schedule pipeline (see pp:lint for why).
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
   image: $GO_IMAGE
   script:
     - wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
@@ -61,6 +73,11 @@ pp:shellcheck:
 
 pp:test:
   stage: test
+  # Skip on the daily schedule pipeline (see pp:lint for why).
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
   image: $GO_IMAGE
   script:
     - go test ./...
@@ -70,6 +87,11 @@ pp:test:
 # runner has a toolchain already, so it runs the same gate with no setup.
 pp:race:
   stage: test
+  # Skip on the daily schedule pipeline (see pp:lint for why).
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
   image: $GO_IMAGE
   script:
     - apk add --no-cache build-base
@@ -77,6 +99,12 @@ pp:race:
 
 pp:image:
   stage: build
+  # Skip on the daily schedule pipeline (see pp:lint for why) — a schedule must
+  # not rebuild and re-push main's SHA images.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
   # The job image is the CLI-only variant (docker:27-cli): it needs the docker
   # client to build/push and talks to the dind service below for the daemon.
   # It is deliberately a DIFFERENT image than the service — docker:27 and
@@ -111,6 +139,11 @@ pp:image:
 
 pp:scan:
   stage: scan
+  # Skip on the daily schedule pipeline (see pp:lint for why).
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
   image: $GO_IMAGE
   script:
     - go install golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION
@@ -118,6 +151,13 @@ pp:scan:
 
 pp:image-scan:
   stage: scan
+  # Skip on the daily schedule pipeline (see pp:lint for why) — the scheduled
+  # rescan of the released tag is pp:rescan-latest-release, not a re-scan of
+  # main's HEAD.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
   # Digest-pinned, same image and command as the GitHub workflow. The trivy
   # image's entrypoint IS the tool; GitLab needs a shell to run script lines,
   # so clear it (GitLab's documented trivy setup).
