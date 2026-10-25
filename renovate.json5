@@ -1,0 +1,105 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  // Base: Renovate's recommended defaults (versioning, grouping, PR template).
+  // It auto-detects the built-in managers that apply here:
+  //   - github-actions : action SHA pins + runs-on in .github/workflows/
+  //   - dockerfile     : the @sha256: base-image pins in Dockerfile
+  //   - gitlabci       : docker image + trivy digest pins in .gitlab-ci.yml,
+  //                      FOLLOWING `include:` into the .gitlab/ci/ templates
+  //   - gomod          : Go modules in go.mod / go.sum
+  extends: ["config:recommended"],
+
+  // PRs, never auto-merge. Every pin bump (a new trivy digest, a new cosign
+  // version) is validated by CI on BOTH platforms before it lands — matching this
+  // repo's "verify against upstream, don't guess" ethos. A pin CI rejects is
+  // caught in the PR, not on main.
+  automerge: false,
+  platformAutomerge: false,
+
+  // Weekday schedule: enough for security pin bumps, keeps PR noise down on a
+  // small repo. (Renovate must be installed as an app on GitHub and/or GitLab
+  // for this to run; the config is inert until then.)
+  schedule: ["after 6am and before 7am on monday, tuesday, wednesday, thursday, friday"],
+
+  // Shell-embedded pins that no built-in manager extracts from `run:` /
+  // `before_script` blocks. Each is a github-releases binary downloaded by
+  // version, or the trivy digest.
+  //
+  // The `v` prefix is deliberately kept OUTSIDE the capture group: with the
+  // default semver-coerced versioning, newValue comes back WITHOUT the v (e.g.
+  // "2.5.0"), so capturing only the digits means Renovate reconstructs a
+  // correct `v2.5.0` URL on update. (Capturing the v would yield newValue
+  // "v2.5.0" and a broken `vv2.5.0` URL.)
+  //
+  // A version that appears on several lines (URL path + tarball filename) gets
+  // one matchStrings entry per occurrence; they share a depName so Renovate
+  // groups them into a single PR that rewrites every occurrence.
+  customManagers: [
+    // cosign — version in the download URL path (binary + checksums lines).
+    {
+      customType: "regex",
+      managerFilePatterns: ["\\.github/workflows/release\\.yml", "\\.gitlab/ci/release\\.yml"],
+      matchStrings: [
+        "sigstore/cosign/releases/download/v(?<currentValue>[0-9][0-9.]*)/cosign",
+      ],
+      depNameTemplate: "sigstore/cosign",
+      datasourceTemplate: "github-releases",
+    },
+
+    // syft — version in the URL path AND the tarball/checksum filenames.
+    {
+      customType: "regex",
+      managerFilePatterns: ["\\.github/workflows/release\\.yml", "\\.gitlab/ci/release\\.yml"],
+      matchStrings: [
+        "syft_(?<currentValue>[0-9][0-9.]*)_linux_amd64\\.tar\\.gz",
+        "syft_(?<currentValue>[0-9][0-9.]*)_checksums\\.txt",
+        "anchore/syft/releases/download/v(?<currentValue>[0-9][0-9.]*)/",
+      ],
+      depNameTemplate: "anchore/syft",
+      datasourceTemplate: "github-releases",
+    },
+
+    // shellcheck — version in the URL path AND the tarball filename.
+    {
+      customType: "regex",
+      managerFilePatterns: ["\\.github/workflows/ci\\.yml", "\\.gitlab/ci/base\\.yml"],
+      matchStrings: [
+        "shellcheck-v(?<currentValue>[0-9][0-9.]*)\\.linux",
+        "koalaman/shellcheck/releases/download/v(?<currentValue>[0-9][0-9.]*)/",
+      ],
+      depNameTemplate: "koalaman/shellcheck",
+      datasourceTemplate: "github-releases",
+    },
+
+    // actionlint — version in the URL path AND the tarball filename. GitHub only
+    // (GitLab's lint job uses shellcheck, not actionlint).
+    {
+      customType: "regex",
+      managerFilePatterns: ["\\.github/workflows/ci\\.yml"],
+      matchStrings: [
+        "actionlint_(?<currentValue>[0-9][0-9.]*)_linux_amd64\\.tar\\.gz",
+        "rhysd/actionlint/releases/download/v(?<currentValue>[0-9][0-9.]*)/",
+      ],
+      depNameTemplate: "rhysd/actionlint",
+      datasourceTemplate: "github-releases",
+    },
+
+    // trivy digest — the GitHub shell-embedded copies only. The GitLab copy
+    // (base.yml's `name: aquasec/trivy@sha256:...`) is already handled by the
+    // built-in gitlabci manager, so listing it here too would double-report.
+    {
+      customType: "regex",
+      managerFilePatterns: [
+        "\\.github/workflows/ci\\.yml",
+        "\\.github/workflows/release\\.yml",
+        "\\.github/workflows/rescan\\.yml",
+      ],
+      matchStrings: [
+        "aquasec/trivy@sha256:(?<currentDigest>[0-9a-f]{64})",
+      ],
+      depNameTemplate: "aquasec/trivy",
+      datasourceTemplate: "docker",
+    },
+  ],
+}
