@@ -9,7 +9,7 @@
 # Go version is declared in go.mod; this pin must match it (see AGENTS.md).
 # 1.27, not just "new enough": the stdlib CVEs that older toolchains embed in
 # static binaries are what image scanners flag, and 1.27's stdlib is clean.
-FROM golang:1.27-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build
+FROM golang:1.27-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS build
 ARG SERVICE
 WORKDIR /src
 
