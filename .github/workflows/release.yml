@@ -202,8 +202,9 @@ jobs:
       packages: write
       id-token: write   # cosign attest (keyless, Sigstore OIDC)
     runs-on: ubuntu-latest
-    # syft scan is the slow step on GitHub's runners: rc.1 and rc.3 (the last
-    # two green releases) took 19-28 min for this job, vs ~25s on GitLab. The
+    # syft scan is the slow step on GitHub's runners: green releases using the
+    # daemon scan (rc.1, rc.3, and now rc.9) took 19-28 min for this job, vs
+    # ~25s on GitLab. The
     # cap must sit above that observed max or the job times out mid-scan — a
     # 10-min cap did exactly that on rc.5/rc.7. 40 min leaves headroom over the
     # worst observed run (28 min) while still failing a truly hung scan in an
