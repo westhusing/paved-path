@@ -105,8 +105,8 @@ jobs:
       # The trivy image's entrypoint IS the tool; clear it so we can run a
       # shell (same as the GitLab job). The ref is expanded on the runner
       # (bash) and passed in single quotes, because $GITHUB_SHA is not set
-      # inside the trivy container. No ignore file: a Go 1.27 build embeds a
-      # stdlib with no known HIGH/CRITICAL CVEs, so the gate is fully real.
+      # inside the trivy container. No ignore file: the gate fails on stdlib
+      # CVEs embedded in a static binary; when one lands, bump Go to clear it.
       # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
       # (a re-push of :0.53.0 would silently swap the scanner), so only the
       # digest is a stable pin.
@@ -114,7 +114,7 @@ jobs:
           img="paved-path/${{ matrix.service }}:${GITHUB_SHA}"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            --entrypoint "" aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
+            --entrypoint "" aquasec/trivy:0.53.0@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
             "trivy image --exit-code 1 --severity HIGH,CRITICAL '$img'"
 
   scan:
