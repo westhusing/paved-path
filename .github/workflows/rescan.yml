@@ -50,5 +50,5 @@ jobs:
           # socket: trivy pulls from GHCR itself, using TRIVY_USERNAME/PASSWORD.
           docker run --rm \
             -e TRIVY_USERNAME="$TRIVY_USERNAME" -e TRIVY_PASSWORD="$TRIVY_PASSWORD" \
-            --entrypoint "" aquasec/trivy@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
+            --entrypoint "" aquasec/trivy:0.53.0@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
             "trivy image --exit-code 1 --severity HIGH,CRITICAL ghcr.io/$REPO/${{ matrix.service }}:$tag"
