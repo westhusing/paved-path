@@ -178,9 +178,9 @@ pp:image-scan:
   # (The trivy DB download is not cached: it's a few MB, and caching it would
   # add a cache key to keep in sync for little gain.)
   image:
-    # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
-    # (a re-push of :0.53.0 would silently swap the scanner), so only the
-    # digest is a stable pin.
+    # Digest = trivy v0.76.1. Pinned by tag+digest: the digest is the stable
+    # pin (a re-push of :0.76.1 would silently swap the scanner), and the tag
+    # keeps Renovate tracking the version series.
     name: aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
     entrypoint: [""]
   parallel:

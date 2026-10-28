@@ -107,14 +107,14 @@ jobs:
       # (bash) and passed in single quotes, because $GITHUB_SHA is not set
       # inside the trivy container. No ignore file: the gate fails on stdlib
       # CVEs embedded in a static binary; when one lands, bump Go to clear it.
-      # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
-      # (a re-push of :0.53.0 would silently swap the scanner), so only the
-      # digest is a stable pin.
+      # Digest = trivy v0.76.1. Pinned by tag+digest: the digest is the stable
+      # pin (a re-push of :0.76.1 would silently swap the scanner), and the tag
+      # keeps Renovate tracking the version series.
       - run: |
           img="paved-path/${{ matrix.service }}:${GITHUB_SHA}"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            --entrypoint "" aquasec/trivy:0.53.0@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
+            --entrypoint "" aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c sh -c \
             "trivy image --exit-code 1 --severity HIGH,CRITICAL '$img'"
 
   scan:
