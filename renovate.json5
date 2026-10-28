@@ -24,7 +24,7 @@
 
   // Shell-embedded pins that no built-in manager extracts from `run:` /
   // `before_script` blocks. Each is a github-releases binary downloaded by
-  // version, or the trivy digest.
+  // version, or the trivy tag+digest pin.
   //
   // The `v` prefix is deliberately kept OUTSIDE the capture group: with the
   // default semver-coerced versioning, newValue comes back WITHOUT the v (e.g.
@@ -85,9 +85,15 @@
       datasourceTemplate: "github-releases",
     },
 
-    // trivy digest — the GitHub shell-embedded copies only. The GitLab copy
-    // (base.yml's `name: aquasec/trivy@sha256:...`) is already handled by the
-    // built-in gitlabci manager, so listing it here too would double-report.
+    // trivy tag+digest — the GitHub shell-embedded copies only. The GitLab
+    // copy (base.yml's `name: aquasec/trivy:...@sha256:...`) is already handled
+    // by the built-in gitlabci manager, so listing it here too would double-report.
+    // Capture BOTH the tag (currentValue) and the digest (currentDigest): a
+    // digest-only capture matches nothing now that the reference carries a tag.
+    // With both, Renovate bumps the tag to the latest release AND re-resolves
+    // the digest for that new tag, rewriting `:0.53.0@sha256:<old>` to
+    // `:<new>@sha256:<new-digest>` in one PR; if the tag is current but a new
+    // digest exists for it, only the digest changes.
     {
       customType: "regex",
       managerFilePatterns: [
@@ -96,7 +102,7 @@
         "\\.github/workflows/rescan\\.yml",
       ],
       matchStrings: [
-        "aquasec/trivy@sha256:(?<currentDigest>[0-9a-f]{64})",
+        "aquasec/trivy:(?<currentValue>[0-9][0-9.]*)@sha256:(?<currentDigest>[0-9a-f]{64})",
       ],
       depNameTemplate: "aquasec/trivy",
       datasourceTemplate: "docker",
