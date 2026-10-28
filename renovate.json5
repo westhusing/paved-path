@@ -85,6 +85,24 @@
       datasourceTemplate: "github-releases",
     },
 
+    // govulncheck — `go install ...@vX.Y.Z` in the GitHub scan job, and the
+    // GOVULNCHECK_VERSION variable on GitLab (the install line there uses the
+    // variable, so only the variable's value is matched). Same depName on both,
+    // so a bump lands as one PR touching both platforms (lockstep).
+    {
+      customType: "regex",
+      managerFilePatterns: ["\\.github/workflows/ci\\.yml", "\\.gitlab/ci/base\\.yml"],
+      matchStrings: [
+        "govulncheck@v(?<currentValue>[0-9][0-9.]*)",
+        "GOVULNCHECK_VERSION: v(?<currentValue>[0-9][0-9.]*)",
+      ],
+      depNameTemplate: "golang/vuln",
+      // github-tags, not github-releases: golang/vuln stopped creating GitHub
+      // Releases at v1.1.4 (Jan 2025) and now cuts tags only — the releases
+      // datasource would report v1.1.4 as latest and never track new versions.
+      datasourceTemplate: "github-tags",
+    },
+
     // trivy tag+digest — the GitHub shell-embedded copies only. The GitLab
     // copy (base.yml's `name: aquasec/trivy:...@sha256:...`) is already handled
     // by the built-in gitlabci manager, so listing it here too would double-report.
