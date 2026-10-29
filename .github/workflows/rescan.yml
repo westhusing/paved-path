@@ -45,9 +45,11 @@ jobs:
           REPO=$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "rescanning ghcr.io/$REPO/${{ matrix.service }}:$tag"
           # Same trivy image + command as the release-time scan (release.yml /
-          # GitLab pp:image-scan). Digest = trivy v0.53.0 (pinned by digest;
-          # tags are mutable, so only the digest is a stable pin). No docker
-          # socket: trivy pulls from GHCR itself, using TRIVY_USERNAME/PASSWORD.
+          # GitLab pp:image-scan). Pinned by tag AND digest: the tag (0.53.0)
+          # is what Renovate tracks against the version series, and the digest
+          # pins the exact bytes (a re-push of :0.53.0 would otherwise silently
+          # swap the scanner). No docker socket: trivy pulls from GHCR itself,
+          # using TRIVY_USERNAME/PASSWORD.
           docker run --rm \
             -e TRIVY_USERNAME="$TRIVY_USERNAME" -e TRIVY_PASSWORD="$TRIVY_PASSWORD" \
             --entrypoint "" aquasec/trivy:0.53.0@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
