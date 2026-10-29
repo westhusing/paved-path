@@ -22,6 +22,33 @@
   // for this to run; the config is inert until then.)
   schedule: ["after 6am and before 7am on monday, tuesday, wednesday, thursday, friday"],
 
+  // Major updates (cosign v2→v3, docker 27→29, actions v7) are a distinct
+  // class: they change behavior, not just a pin. automerge is already false so
+  // none merge automatically; this label makes them filterable in the UI and
+  // flags them for the RC-test-before-stable process (see README / release
+  // notes) rather than being bulk-merged with the routine digest bumps.
+  packageRules: [
+    {
+      matchUpdateTypes: ["major"],
+      labels: ["major", "manual-review"],
+    },
+
+    // All Go toolchain references must land in ONE PR, or the shipped binary's
+    // stdlib drifts from what go.mod promises — the toolchain gate in ci.yml /
+    // base.yml exists to catch exactly that. The three references have different
+    // depNames/datasources, so they don't group on their own:
+    //   - go.mod `go` directive  -> depName "go",     golang-version datasource
+    //   - Dockerfile base image  -> depName "golang", docker (built-in manager)
+    //   - GitLab GO_IMAGE var    -> depName "golang", docker (custom manager)
+    // matchDepNames is an OR over the array, so this single rule captures all
+    // three and folds them into one PR (groupName). They still update to their
+    // own latest independently — the grouping only guarantees atomic landing.
+    {
+      matchDepNames: ["go", "golang"],
+      groupName: "Go toolchain (go.mod + images)",
+    },
+  ],
+
   // Shell-embedded pins that no built-in manager extracts from `run:` /
   // `before_script` blocks. Each is a github-releases binary downloaded by
   // version, or the trivy tag+digest pin.
@@ -85,6 +112,24 @@
       datasourceTemplate: "github-releases",
     },
 
+    // govulncheck — `go install ...@vX.Y.Z` in the GitHub scan job, and the
+    // GOVULNCHECK_VERSION variable on GitLab (the install line there uses the
+    // variable, so only the variable's value is matched). Same depName on both,
+    // so a bump lands as one PR touching both platforms (lockstep).
+    {
+      customType: "regex",
+      managerFilePatterns: ["\\.github/workflows/ci\\.yml", "\\.gitlab/ci/base\\.yml"],
+      matchStrings: [
+        "govulncheck@v(?<currentValue>[0-9][0-9.]*)",
+        "GOVULNCHECK_VERSION: v(?<currentValue>[0-9][0-9.]*)",
+      ],
+      depNameTemplate: "golang/vuln",
+      // github-tags, not github-releases: golang/vuln stopped creating GitHub
+      // Releases at v1.1.4 (Jan 2025) and now cuts tags only — the releases
+      // datasource would report v1.1.4 as latest and never track new versions.
+      datasourceTemplate: "github-tags",
+    },
+
     // trivy tag+digest — the GitHub shell-embedded copies only. The GitLab
     // copy (base.yml's `name: aquasec/trivy:...@sha256:...`) is already handled
     // by the built-in gitlabci manager, so listing it here too would double-report.
@@ -105,6 +150,24 @@
         "aquasec/trivy:(?<currentValue>[0-9][0-9.]*)@sha256:(?<currentDigest>[0-9a-f]{64})",
       ],
       depNameTemplate: "aquasec/trivy",
+      datasourceTemplate: "docker",
+    },
+
+    // golang image — the GitLab GO_IMAGE variable only. The Dockerfile's
+    // `FROM golang:...` is already tracked by the built-in dockerfile manager,
+    // which yields depName "golang" (the tag becomes currentValue). This regex
+    // reproduces that exact identity — depName "golang", the tag as currentValue,
+    // and the digest as currentDigest — so a Go update lands in ONE PR touching
+    // both the Dockerfile and the GitLab variable (lockstep). The built-in
+    // gitlabci manager only reads job-level `image:`/`services:`, not top-level
+    // `variables:`, so without this the GitLab pin would silently drift.
+    {
+      customType: "regex",
+      managerFilePatterns: ["^\\.gitlab/ci/base\\.yml$"],
+      matchStrings: [
+        "GO_IMAGE: golang:(?<currentValue>[^@\\s]+)@sha256:(?<currentDigest>[0-9a-f]{64})",
+      ],
+      depNameTemplate: "golang",
       datasourceTemplate: "docker",
     },
   ],

@@ -68,6 +68,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: { go-version-file: go.mod, cache: false }
+      # Go toolchain must match go.mod's declared version. On GitHub setup-go
+      # installs it FROM go.mod, so this is a lockstep no-op here — but the
+      # identical check on GitLab (pp:lint) guards the real risk: $GO_IMAGE
+      # drifting from go.mod, which would let the shipped binary's stdlib (and
+      # its CVE surface) silently diverge from what go.mod promises. awk, not
+      # jq: the golang image has no jq.
+      - run: |
+          [ "$(go env GOVERSION)" = "go$(awk '$1=="go"{print $2}' go.mod)" ] \
+            || { echo "Go toolchain drift: $(go env GOVERSION) vs go.mod"; exit 1; }
       # gofmt is a hard gate (same check as `make lint` and the GitLab pp:lint
       # job): a non-empty list of unformatted files fails. gofmt ships with the
       # Go toolchain, so no extra install.
@@ -107,9 +116,10 @@ jobs:
       # (bash) and passed in single quotes, because $GITHUB_SHA is not set
       # inside the trivy container. No ignore file: the gate fails on stdlib
       # CVEs embedded in a static binary; when one lands, bump Go to clear it.
-      # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
-      # (a re-push of :0.53.0 would silently swap the scanner), so only the
-      # digest is a stable pin.
+      # Pinned by tag AND digest: the tag (0.53.0) is what Renovate tracks
+      # against the version series, and the digest pins the exact bytes (a
+      # re-push of :0.53.0 would otherwise silently swap the scanner). Renovate
+      # rewrites both in one PR (see renovate.json5's trivy custom manager).
       - run: |
           img="paved-path/${{ matrix.service }}:${GITHUB_SHA}"
           docker run --rm \

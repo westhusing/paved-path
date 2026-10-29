@@ -43,6 +43,15 @@ pp:lint:
     - when: on_success
   image: $GO_IMAGE
   script:
+    # Go toolchain must match go.mod's declared version. On GitLab the
+    # toolchain comes from $GO_IMAGE (the digest-pinned golang image), so this
+    # is the real guard: if GO_IMAGE drifts from go.mod, the shipped binary's
+    # stdlib (and its CVE surface) silently diverges from what go.mod promises.
+    # The identical check on GitHub (lint job) is a lockstep no-op there, since
+    # setup-go installs from go.mod. awk, not jq: the golang image has no jq.
+    - |
+      [ "$(go env GOVERSION)" = "go$(awk '$1=="go"{print $2}' go.mod)" ] \
+        || { echo "Go toolchain drift: $(go env GOVERSION) vs go.mod"; exit 1; }
     # gofmt is a hard gate (same check as `make lint` and the GitHub lint job):
     # a non-empty list of unformatted files fails. gofmt ships with the Go
     # toolchain, so no extra install.
@@ -178,9 +187,10 @@ pp:image-scan:
   # (The trivy DB download is not cached: it's a few MB, and caching it would
   # add a cache key to keep in sync for little gain.)
   image:
-    # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
-    # (a re-push of :0.53.0 would silently swap the scanner), so only the
-    # digest is a stable pin.
+    # Pinned by tag AND digest: the tag (0.53.0) is what Renovate tracks
+    # against the version series, and the digest pins the exact bytes (a
+    # re-push of :0.53.0 would otherwise silently swap the scanner). Renovate
+    # rewrites both in one PR (the built-in gitlabci manager handles this pin).
     name: aquasec/trivy:0.53.0@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
     entrypoint: [""]
   parallel:

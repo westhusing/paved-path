@@ -10,7 +10,10 @@ name: release
 on:
   push:
     # Stable tags and release candidates (v1.2.3-rc.1). The GitLab rule
-    # regex matches the same set (see .gitlab/ci/release.yml).
+    # regex matches the same set (see .gitlab/ci/release.yml). Tag-only by
+    # trigger: there is no PR dry-run — a broken release pipeline is caught by
+    # cutting an -rc tag (which runs this whole workflow end-to-end, including
+    # promote/sign/sbom), not by a partial build+scan on the PR.
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+'
@@ -39,6 +42,8 @@ env:
   # see .gitlab/ci/release.yml.
   COSIGN_ISSUER: "https://token.actions.githubusercontent.com"
 
+# Tag-only workflow (see the `on:` block): every job runs on a tag push, so no
+# per-job ref conditions are needed — the trigger already guarantees a tag ref.
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -110,9 +115,10 @@ jobs:
       # $REGISTRY/$GITHUB_SHA are not set inside the trivy container. No
       # ignore file: the gate fails on stdlib CVEs embedded in a static binary;
       # when one lands, bump Go to clear it.
-      # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
-      # (a re-push of :0.53.0 would silently swap the scanner), so only the
-      # digest is a stable pin.
+      # Pinned by tag AND digest: the tag (0.53.0) is what Renovate tracks
+      # against the version series, and the digest pins the exact bytes (a
+      # re-push of :0.53.0 would otherwise silently swap the scanner). Renovate
+      # rewrites both in one PR (see renovate.json5's trivy custom manager).
       - run: |
           REPO=$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           img="$REGISTRY/$REPO/${{ matrix.service }}:$GITHUB_SHA"

@@ -1,0 +1,100 @@
+# Mirror every branch and tag from GitHub to GitLab, so GitLab runs its CI on
+# the same code. The README documents GitLab as "the same gates, second
+# platform — templates stay in lockstep"; without this, only `main` reaches
+# GitLab and PR branches are gated by GitHub Actions alone.
+#
+# Model: GitHub is the source of truth; GitLab is a CI mirror. Every ref pushed
+# to GitHub (a branch or a tag) is force-pushed to GitLab, which then runs its
+# own pipeline (base.yml on branches, base+release on tags). Force is deliberate:
+# Renovate rebases its branches, so GitLab must always match GitHub rather than
+# reject a non-fast-forward push. Tags are the exception — they're immutable, so
+# they're pushed WITHOUT force: a tag that already exists on GitLab with different
+# content is an error we want to see, not silently overwrite. Nothing is ever
+# pushed *from* GitLab, so force can't clobber work that only exists there.
+#
+# Auth: an SSH deploy key, not an HTTPS token. GitLab's docs name the deploy
+# key as the mechanism for pushing to *protected* branches (Settings > Repository
+# > Branch rules > <branch> > Allowed to push and merge > Deploy keys) and for
+# creating *protected* tags (Settings > Repository > Protected tags > <tag> >
+# Allowed to create). A write_repository deploy token is not the documented path
+# for protected refs, so a single SSH key mirrors everything (protected main,
+# plain branches, tags). Force-pushing to a protected branch additionally needs
+# that branch rule's "Allowed to force push" toggle on. See the handoff notes for
+# the exact clicks — none of them are expressible in this file.
+#
+# This is a GitHub Actions workflow, so it runs on GitHub and pushes to GitLab —
+# no feedback loop (GitLab doesn't run this file).
+#
+# Required secret: GITLAB_DEPLOY_KEY — the PRIVATE half of a GitLab project deploy
+# key (Settings > Repository > Deploy keys), created with write access. The public
+# half lives in GitLab; the private half is added here as a repository secret.
+
+name: mirror-to-gitlab
+on:
+  # All branches and all tags — a full mirror, not just main. A branch/tag
+  # deletion arrives as a push event with `deleted: true` (same trigger).
+  push:
+
+permissions:
+  contents: read   # checkout only; the GitLab push uses the SSH deploy key
+
+env:
+  # The GitLab path. It happens to match the GitHub repo here, but it's stated
+  # explicitly so a rename of one side doesn't silently break the other.
+  GITLAB_REPO: "westhusing/paved-path"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    # Serialize pushes per ref so a rapid push-then-push (or push-then-delete)
+    # to the same branch can't arrive out of order on GitLab. cancel-in-progress:
+    # false makes the later push WAIT for the earlier one to finish, not cancel it.
+    concurrency:
+      group: mirror-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      # Check out by SHA (not by ref): a branch deletion has no live ref to check
+      # out, but github.sha is always the last commit of that ref, so this works
+      # for pushes and deletions alike. fetch-depth: 0 gives full history so GitLab
+      # receives complete ancestry (and the annotated-tag objects), not just the tip.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Configure the SSH deploy key
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.GITLAB_DEPLOY_KEY }}" > ~/.ssh/gitlab_deploy_key
+          chmod 600 ~/.ssh/gitlab_deploy_key
+          # Pin gitlab.com's host key. ssh-keyscan fetches the live keys rather than
+          # a hardcoded fingerprint — the standard trade-off for a CI mirror.
+          ssh-keyscan -t ed25519,rsa gitlab.com >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Mirror the ref to GitLab
+        env:
+          # In env (not inline) so the key path is stable and no secret ever appears
+          # in a git error message that prints the remote URL.
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/gitlab_deploy_key -o IdentitiesOnly=yes"
+        run: |
+          git remote add gitlab "git@gitlab.com:${GITLAB_REPO}.git"
+          if [ "${{ github.event.deleted }}" = "true" ]; then
+            # Mirror a deletion: remove the ref on GitLab (works for branches and tags).
+            git push gitlab ":$GITHUB_REF"
+          else
+            case "$GITHUB_REF" in
+              refs/tags/*)
+                # Materialize the local annotated tag ref (checkout-by-SHA leaves a
+                # detached HEAD with no tag ref), then push it. No --force: tags are
+                # immutable, so a mismatch is an error we want to see.
+                git fetch origin "$GITHUB_REF"
+                git push gitlab "$GITHUB_REF"
+                ;;
+              *)
+                # Branch: force so GitLab always matches GitHub (Renovate rebases).
+                git push --force gitlab "HEAD:$GITHUB_REF"
+                ;;
+            esac
+          fi
