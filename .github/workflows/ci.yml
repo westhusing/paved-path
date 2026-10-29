@@ -41,7 +41,7 @@ jobs:
           tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint
       # shellcheck is the same idea for the bash scripts.
       - run: |
-          wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+          wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
           echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tgz" | sha256sum -c -
           tar -xJf /tmp/shellcheck.tgz -C /usr/local/bin --strip-components=1 shellcheck-v0.10.0/shellcheck
       # No args: actionlint finds every workflow under .github/workflows.

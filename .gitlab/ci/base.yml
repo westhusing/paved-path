@@ -64,7 +64,7 @@ pp:shellcheck:
     - when: on_success
   image: $GO_IMAGE
   script:
-    - wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+    - wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
     # shellcheck ships no checksums file, so the hash is pinned here. A
     # download step that doesn't check its bytes is an unpinned dependency.
     - echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tgz" | sha256sum -c -
