@@ -28,6 +28,13 @@
 # Required secret: GITLAB_DEPLOY_KEY — the PRIVATE half of a GitLab project deploy
 # key (Settings > Repository > Deploy keys), created with write access. The public
 # half lives in GitLab; the private half is added here as a repository secret.
+#
+# Second secret: GITLAB_READ_TOKEN — a project access token with the read_api
+# scope. When present, the mirror job waits for the GitLab pipeline its push just
+# triggered and fails if that pipeline fails — turning GitLab from an advisory
+# mirror into a real gate (make this workflow a required check on main to enforce
+# it). Without the token, GitLab results stay advisory: the mirror pushes and
+# reports success without waiting.
 
 name: mirror-to-gitlab
 on:
@@ -46,6 +53,9 @@ env:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    # The wait-for-pipeline step can take as long as a full GitLab pipeline, so
+    # bound the job well under the 360-min default.
+    timeout-minutes: 45
     # Serialize pushes per ref so a rapid push-then-push (or push-then-delete)
     # to the same branch can't arrive out of order on GitLab. cancel-in-progress:
     # false makes the later push WAIT for the earlier one to finish, not cancel it.
@@ -68,9 +78,14 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "${{ secrets.GITLAB_DEPLOY_KEY }}" > ~/.ssh/gitlab_deploy_key
           chmod 600 ~/.ssh/gitlab_deploy_key
-          # Pin gitlab.com's host key. ssh-keyscan fetches the live keys rather than
-          # a hardcoded fingerprint — the standard trade-off for a CI mirror.
-          ssh-keyscan -t ed25519,rsa gitlab.com >> ~/.ssh/known_hosts
+          # Pin gitlab.com's host key by hardcoding GitLab.com's published keys, so a
+          # spoofed host fails instead of being trusted on first contact (ssh-keyscan
+          # would accept whatever key it gets). If GitLab rotates these, this line fails
+          # loudly and we update it deliberately. Fingerprints: ed25519
+          # SHA256:eUXGGm1YGsMAS7vkcx6JOJdOGHPem5gQp4taiCfCLB8, rsa
+          # SHA256:ROQFvPThGrW4RuWLoL9tq9I9zJ42fK4XywyRtbOz/EQ.
+          echo "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf" >> ~/.ssh/known_hosts
+          echo "gitlab.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCsj2bNKTBSpIYDEGk9KxsGh3mySTRgMtXL583qmBpzeQ+jqCMRgBqB98u3z++J1sKlXHWfM9dyhSevkMwSbhoR8XIq/U0tCNyokEi/ueaBMCvbcTHhO7FcwzY92WK4Yt0aGROY5qX2UKSeOvuP4D6TPqKF1onrSzH9bx9XUf2lEdWT/ia1NEKjunUqu1xOB/StKDHMoX4/OKyIzuS0q/T1zOATthvasJFoPrAjkohTyaDUz2LN5JoH839hViyEG82yB+MjcFV5MU3N1l1QL3cVUCh93xSaua1N85qivl+siMkPGbO5xR/En4iEY6K2XPASUEMaieWVNTRCtJ4S8H+9" >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
       - name: Mirror the ref to GitLab
@@ -92,9 +107,75 @@ jobs:
                 git fetch origin "$GITHUB_REF"
                 git push gitlab "$GITHUB_REF"
                 ;;
+              refs/heads/main)
+                # main: fast-forward only, no --force. GitHub's main is never
+                # force-pushed, so GitLab's main can stay protected (no "allowed to
+                # force push" needed). A non-FF here means the two sides diverged —
+                # an error we want to see, not silently overwrite.
+                git push gitlab "HEAD:$GITHUB_REF"
+                ;;
               *)
-                # Branch: force so GitLab always matches GitHub (Renovate rebases).
+                # Other branches: force so GitLab always matches GitHub (Renovate
+                # rebases its branches, which would otherwise be non-FF).
                 git push --force gitlab "HEAD:$GITHUB_REF"
                 ;;
             esac
           fi
+
+      # Wait for the GitLab pipeline this push triggered, and fail if it fails.
+      # This is what turns the mirror from advisory into a gate: with this step,
+      # "mirror-to-gitlab" is green only when GitLab's own CI passed. Make this
+      # workflow a required check on main to enforce it. Needs GITLAB_READ_TOKEN
+      # (a project access token with read_api); without it, GitLab results stay
+      # advisory and this step warns + skips. Skipped on deletions (no pipeline).
+      - name: Wait for the GitLab pipeline
+        # Only on pushes (not deletions): a deleted ref has no pipeline to wait for.
+        # `!github.event.deleted` (not `== false`) so an absent field still waits.
+        if: !github.event.deleted
+        env:
+          GITLAB_READ_TOKEN: ${{ secrets.GITLAB_READ_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${GITLAB_READ_TOKEN:-}" ]; then
+            echo "GITLAB_READ_TOKEN not set — GitLab results are advisory (not gating)."
+            exit 0
+          fi
+          # The API accepts a URL-encoded project path in place of the numeric id.
+          ENC=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$GITLAB_REPO")
+          BASE="https://gitlab.com/api/v4/projects/$ENC"
+          # Fail fast on a bad token/project rather than polling for 30 min.
+          if ! curl -sf -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" "$BASE" >/dev/null; then
+            echo "GitLab API call failed (bad token or project?)"; exit 1
+          fi
+          # 1) Wait for a pipeline to appear for this exact commit (up to ~2 min).
+          # The python one-liner prints nothing on any failure (empty body, bad
+          # JSON, transient curl error), so a blip just reads as "not yet" and the
+          # loop retries — no traceback noise, no false terminal state.
+          pid=""
+          for _ in $(seq 1 24); do
+            pid=$(curl -sf -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" \
+              "$BASE/pipelines?sha=${GITHUB_SHA}&per_page=1" \
+              | python3 -c 'import sys,json
+                try: print(json.load(sys.stdin)[0]["id"])
+                except Exception: pass')
+            [ -n "$pid" ] && break
+            sleep 5
+          done
+          if [ -z "$pid" ]; then echo "no GitLab pipeline appeared for ${GITHUB_SHA}"; exit 1; fi
+          echo "waiting on GitLab pipeline $pid"
+          # 2) Wait for it to reach a terminal state (up to ~30 min). A transient
+          # curl failure yields an empty status, which falls through to `*` and
+          # retries — only a real terminal state ends the loop.
+          for _ in $(seq 1 360); do
+            status=$(curl -sf -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" \
+              "$BASE/pipelines/$pid" \
+              | python3 -c 'import sys,json
+                try: print(json.load(sys.stdin)["status"])
+                except Exception: pass')
+            case "$status" in
+              success) echo "GitLab pipeline $pid succeeded"; exit 0 ;;
+              failed|canceled|skipped) echo "GitLab pipeline $pid: $status"; exit 1 ;;
+              *) sleep 5 ;;
+            esac
+          done
+          echo "timed out waiting for GitLab pipeline $pid"; exit 1

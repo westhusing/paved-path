@@ -33,6 +33,20 @@
       labels: ["major", "manual-review"],
     },
 
+    // The gomod manager does NOT update the `go` directive by default (its docs:
+    // "Renovate's default behavior is not to propose upgrades to it"). This repo
+    // pins the exact patch in go.mod (1.27.3) and the toolchain gate in ci.yml /
+    // base.yml / Dockerfile requires it to match the images — so a Go bump that
+    // only touched the images would fail its own PR. This rule (the exact config
+    // from Renovate's gomod docs) makes the go line bump to latest in the same
+    // grouped PR as the images, so the gate stays green.
+    {
+      matchManagers: ["gomod"],
+      matchDepNames: ["go"],
+      matchDepTypes: ["golang"],
+      rangeStrategy: "bump",
+    },
+
     // All Go toolchain references must land in ONE PR, or the shipped binary's
     // stdlib drifts from what go.mod promises — the toolchain gate in ci.yml /
     // base.yml exists to catch exactly that. The three references have different
@@ -87,16 +101,29 @@
       datasourceTemplate: "github-releases",
     },
 
-    // shellcheck — version in the URL path AND the tarball filename.
+    // shellcheck — the official image, pinned by tag+digest. The GitHub copy is
+    // ci.yml's `docker run koalaman/shellcheck-alpine:vX@sha256:...` (a job
+    // `container:` won't work — the image has no git, so checkout would fail),
+    // which no built-in manager parses out of a `run:` block. The GitLab copy
+    // (base.yml's job-level `image: koalaman/shellcheck-alpine:vX@sha256:...`)
+    // is already tracked by the built-in gitlabci manager, so it's NOT listed
+    // here — listing it would double-report (same reason the trivy manager below
+    // excludes base.yml). Same depName on both, so a bump rewrites tag+digest in
+    // one lockstep PR. The digest pins the exact bytes, so there is no hand-kept
+    // hash to go stale (unlike the old downloaded-binary form).
+    //
+    // The tag is captured with `[^@\s]+` (the whole tag, INCLUDING the leading
+    // v), not `[0-9][0-9.]*`: shellcheck-alpine tags are v-prefixed (v0.11.0),
+    // so a digit-anchored capture matches nothing. Capturing the full tag also
+    // mirrors what gitlabci extracts for base.yml, keeping the two in lockstep.
     {
       customType: "regex",
-      managerFilePatterns: ["\\.github/workflows/ci\\.yml", "\\.gitlab/ci/base\\.yml"],
+      managerFilePatterns: ["\\.github/workflows/ci\\.yml"],
       matchStrings: [
-        "shellcheck-v(?<currentValue>[0-9][0-9.]*)\\.linux",
-        "koalaman/shellcheck/releases/download/v(?<currentValue>[0-9][0-9.]*)/",
+        "koalaman/shellcheck-alpine:(?<currentValue>[^@\\s]+)@sha256:(?<currentDigest>[0-9a-f]{64})",
       ],
-      depNameTemplate: "koalaman/shellcheck",
-      datasourceTemplate: "github-releases",
+      depNameTemplate: "koalaman/shellcheck-alpine",
+      datasourceTemplate: "docker",
     },
 
     // actionlint — version in the URL path, the tarball filename, and the

@@ -42,19 +42,19 @@ jobs:
           wget -qO /tmp/actionlint_checksums.txt https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
           (cd /tmp && grep " actionlint_1.7.12_linux_amd64.tar.gz$" actionlint_checksums.txt | sha256sum -c -)
           tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint
-      # shellcheck is the same idea for the bash scripts. It ships no checksums
-      # file, so (unlike actionlint above) its bytes are not hash-verified — a
-      # deliberate trade: pinning the hash would go stale on every Renovate bump
-      # and break CI, so we pin the version in the URL instead. The binary is
-      # pulled out of a full extract (not `tar ... '*/shellcheck'`): the GitLab
-      # job runs busybox tar, which does not glob member names.
-      - run: |
-          wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
-          mkdir -p /tmp/shellcheck-extract && tar -xJf /tmp/shellcheck.tgz -C /tmp/shellcheck-extract
-          install /tmp/shellcheck-extract/*/shellcheck /usr/local/bin/shellcheck
       # No args: actionlint finds every workflow under .github/workflows.
       - run: actionlint
-      - run: shellcheck scripts/*.sh
+      # shellcheck runs from its official image, pinned by tag+digest (not a
+      # downloaded binary): the digest pins the exact bytes, and Renovate bumps
+      # tag+digest together (see renovate.json5), so there is no hand-kept hash to
+      # go stale. The image has no git, so it can't be a job `container:` (checkout
+      # would fail) — we run it via docker on the ubuntu runner instead. Same image
+      # + digest as GitLab's pp:shellcheck, so a bump lands in one lockstep PR.
+      - run: |
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            koalaman/shellcheck-alpine:v0.11.0@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002 \
+            shellcheck scripts/*.sh
       # The GitLab templates are included from a root .gitlab-ci.yml this repo
       # doesn't have (this repo IS the template), so `glab ci lint` can't run
       # here. Validate them against GitLab's own CI schema instead — the same
