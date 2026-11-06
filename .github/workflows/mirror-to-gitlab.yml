@@ -25,16 +25,21 @@
 # This is a GitHub Actions workflow, so it runs on GitHub and pushes to GitLab —
 # no feedback loop (GitLab doesn't run this file).
 #
+# Two jobs: `mirror` pushes the ref (serialized per-ref by a concurrency group),
+# and `wait-for-gitlab` (needs: mirror) polls the GitLab pipeline that push
+# triggered and fails if it fails. The wait is a SEPARATE job, not a step in
+# `mirror`, so it doesn't hold the per-ref concurrency lock for up to 30 minutes
+# — a new push can mirror while the previous one's pipeline is still running.
+#
 # Required secret: GITLAB_DEPLOY_KEY — the PRIVATE half of a GitLab project deploy
 # key (Settings > Repository > Deploy keys), created with write access. The public
 # half lives in GitLab; the private half is added here as a repository secret.
 #
 # Second secret: GITLAB_READ_TOKEN — a project access token with the read_api
-# scope. When present, the mirror job waits for the GitLab pipeline its push just
-# triggered and fails if that pipeline fails — turning GitLab from an advisory
-# mirror into a real gate (make this workflow a required check on main to enforce
-# it). Without the token, GitLab results stay advisory: the mirror pushes and
-# reports success without waiting.
+# scope. When present, wait-for-gitlab turns GitLab from an advisory mirror into
+# a real gate (make this workflow a required check on main to enforce it). Without
+# the token, GitLab results stay advisory: the mirror pushes and reports success
+# without waiting.
 
 name: mirror-to-gitlab
 on:
@@ -53,12 +58,11 @@ env:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    # The wait-for-pipeline step can take as long as a full GitLab pipeline, so
-    # bound the job well under the 360-min default.
-    timeout-minutes: 45
     # Serialize pushes per ref so a rapid push-then-push (or push-then-delete)
     # to the same branch can't arrive out of order on GitLab. cancel-in-progress:
     # false makes the later push WAIT for the earlier one to finish, not cancel it.
+    # This lock is released as soon as the push lands — the (slow) pipeline wait
+    # lives in a separate job so it doesn't hold this lock.
     concurrency:
       group: mirror-${{ github.ref }}
       cancel-in-progress: false
@@ -122,18 +126,38 @@ jobs:
             esac
           fi
 
-      # Wait for the GitLab pipeline this push triggered, and fail if it fails.
-      # This is what turns the mirror from advisory into a gate: with this step,
-      # "mirror-to-gitlab" is green only when GitLab's own CI passed. Make this
-      # workflow a required check on main to enforce it. Needs GITLAB_READ_TOKEN
-      # (a project access token with read_api); without it, GitLab results stay
-      # advisory and this step warns + skips. Skipped on deletions (no pipeline).
+  # Wait for the GitLab pipeline the mirror push triggered, and fail if it fails.
+  # This is what turns the mirror from advisory into a gate: with this job,
+  # "mirror-to-gitlab" is green only when GitLab's own CI passed. Make this
+  # workflow a required check on main to enforce it. Needs GITLAB_READ_TOKEN (a
+  # project access token with read_api); without it, GitLab results stay advisory
+  # and the step warns + skips. Skipped on deletions (no pipeline to wait for).
+  #
+  # A separate job (not a step in `mirror`) so the per-ref concurrency lock is
+  # released as soon as the push lands — a new push can mirror while this job is
+  # still polling. It has NO concurrency group of its own: it only polls, so it
+  # must not serialize anything.
+  wait-for-gitlab:
+    runs-on: ubuntu-latest
+    # Only wait once the push has actually landed on GitLab. If the push failed,
+    # there's no pipeline to wait for (and the run is already red).
+    needs: mirror
+    # Only on pushes, not deletions. Two things are deliberate here:
+    #  - `${{ ... }}` is REQUIRED: a bare `!github.event.deleted` starts with `!`,
+    #    which YAML reads as a tag, not an expression — the file won't parse
+    #    (GitHub rejects it before running).
+    #  - `needs.mirror.result == 'success'` is stated explicitly. GitHub's docs say
+    #    an explicit `if` can override the default "only run when dependencies
+    #    succeed", so we don't rely on that default: if the push failed there's no
+    #    pipeline to wait for, and we don't want a second, confusing failure.
+    if: ${{ !github.event.deleted && needs.mirror.result == 'success' }}
+    # The wait can take as long as a full GitLab pipeline (~30 min), so bound the
+    # job well under the 360-min default.
+    timeout-minutes: 45
+    env:
+      GITLAB_READ_TOKEN: ${{ secrets.GITLAB_READ_TOKEN }}
+    steps:
       - name: Wait for the GitLab pipeline
-        # Only on pushes (not deletions): a deleted ref has no pipeline to wait for.
-        # `!github.event.deleted` (not `== false`) so an absent field still waits.
-        if: !github.event.deleted
-        env:
-          GITLAB_READ_TOKEN: ${{ secrets.GITLAB_READ_TOKEN }}
         run: |
           set -uo pipefail
           if [ -z "${GITLAB_READ_TOKEN:-}" ]; then
@@ -147,34 +171,37 @@ jobs:
           if ! curl -sf -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" "$BASE" >/dev/null; then
             echo "GitLab API call failed (bad token or project?)"; exit 1
           fi
-          # 1) Wait for a pipeline to appear for this exact commit (up to ~2 min).
-          # The python one-liner prints nothing on any failure (empty body, bad
-          # JSON, transient curl error), so a blip just reads as "not yet" and the
-          # loop retries — no traceback noise, no false terminal state.
+          # Match the pipeline for THIS commit AND this exact ref (branch or tag).
+          # The ref filter matters: a release tag cut on main's commit would
+          # otherwise match main's old pipeline and pass before the (signing) tag
+          # pipeline is even created. jq (preinstalled on ubuntu-latest) parses the
+          # JSON; `// empty` prints nothing on a missing key or bad input, so a
+          # transient blip reads as "not yet" and the loop retries — no traceback,
+          # no false terminal state. (A python -c one-liner can't be used: its
+          # second line would be indented, which python rejects.)
           pid=""
           for _ in $(seq 1 24); do
             pid=$(curl -sf -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" \
-              "$BASE/pipelines?sha=${GITHUB_SHA}&per_page=1" \
-              | python3 -c 'import sys,json
-                try: print(json.load(sys.stdin)[0]["id"])
-                except Exception: pass')
+              "$BASE/pipelines?sha=${GITHUB_SHA}&ref=${GITHUB_REF_NAME}&per_page=1" \
+              | jq -r '.[0].id // empty')
             [ -n "$pid" ] && break
             sleep 5
           done
-          if [ -z "$pid" ]; then echo "no GitLab pipeline appeared for ${GITHUB_SHA}"; exit 1; fi
+          if [ -z "$pid" ]; then echo "no GitLab pipeline appeared for ${GITHUB_SHA} on ${GITHUB_REF_NAME}"; exit 1; fi
           echo "waiting on GitLab pipeline $pid"
-          # 2) Wait for it to reach a terminal state (up to ~30 min). A transient
-          # curl failure yields an empty status, which falls through to `*` and
-          # retries — only a real terminal state ends the loop.
+          # Wait for a terminal state (up to ~30 min). A transient curl failure yields
+          # an empty status, which falls through to `*` and retries — only a real
+          # terminal state ends the loop. manual/scheduled never resolve on their own
+          # (they wait on a human), so treat them as done: pass with a warning rather
+          # than burning the full 30 minutes.
           for _ in $(seq 1 360); do
             status=$(curl -sf -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" \
               "$BASE/pipelines/$pid" \
-              | python3 -c 'import sys,json
-                try: print(json.load(sys.stdin)["status"])
-                except Exception: pass')
+              | jq -r '.status // empty')
             case "$status" in
               success) echo "GitLab pipeline $pid succeeded"; exit 0 ;;
               failed|canceled|skipped) echo "GitLab pipeline $pid: $status"; exit 1 ;;
+              manual|scheduled) echo "GitLab pipeline $pid is '$status' (waiting on a human) — not blocking"; exit 0 ;;
               *) sleep 5 ;;
             esac
           done

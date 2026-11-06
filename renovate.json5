@@ -57,9 +57,16 @@
     // matchDepNames is an OR over the array, so this single rule captures all
     // three and folds them into one PR (groupName). They still update to their
     // own latest independently — the grouping only guarantees atomic landing.
+    //
+    // allowedVersions caps the whole group at <1.28: rangeStrategy:bump (above)
+    // would otherwise move the go directive to the newest release (1.28.x) while
+    // the images stay on 1.27-alpine, and the toolchain gate would fail that PR.
+    // A 1.28 move is a deliberate decision (new stdlib, re-test everything), so
+    // lift this cap on purpose when you make it.
     {
       matchDepNames: ["go", "golang"],
       groupName: "Go toolchain (go.mod + images)",
+      allowedVersions: "<1.28",
     },
   ],
 
