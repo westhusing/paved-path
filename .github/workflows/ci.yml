@@ -33,7 +33,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: |
-          wget -qO /tmp/actionlint.tgz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          # Download with the ORIGINAL filename (not a shortened name): sha256sum -c
+          # looks up the file by the name recorded in checksums.txt, so a renamed
+          # download makes it fail with "No such file or directory". Same pattern as
+          # the syft/cosign installs in release.yml.
+          wget -qO /tmp/actionlint_1.7.12_linux_amd64.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           # Verify the download before running it (same supply-chain stance as
           # the cosign/syft installs in release.yml): check against actionlint's
           # own checksums.txt. A hardcoded sha256 would go stale on every
@@ -41,7 +45,7 @@ jobs:
           # is rewritten by the same bump, so no hash maintenance is needed.
           wget -qO /tmp/actionlint_checksums.txt https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
           (cd /tmp && grep " actionlint_1.7.12_linux_amd64.tar.gz$" actionlint_checksums.txt | sha256sum -c -)
-          tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint
+          tar -xzf /tmp/actionlint_1.7.12_linux_amd64.tar.gz -C /usr/local/bin actionlint
       # No args: actionlint finds every workflow under .github/workflows.
       - run: actionlint
       # shellcheck runs from its official image, pinned by tag+digest (not a
