@@ -43,9 +43,15 @@
 
 name: mirror-to-gitlab
 on:
-  # All branches and all tags — a full mirror, not just main. A branch/tag
-  # deletion arrives as a push event with `deleted: true` (same trigger).
+  # All branches and all tags — a full mirror, not just main.
   push:
+  # Ref deletions are NOT push events: GitHub has a separate `delete` event, and
+  # on it GITHUB_REF/GITHUB_SHA revert to the default branch — the deleted ref
+  # only exists in github.event.ref/ref_type. (Verified empirically: deleting two
+  # branches on GitHub produced no `push` runs at all, and the stale refs stayed
+  # on GitLab.) Without this trigger, deletions never reach GitLab and stale
+  # branches accumulate there.
+  delete:
 
 permissions:
   contents: read   # checkout only; the GitLab push uses the SSH deploy key
@@ -64,13 +70,19 @@ jobs:
     # This lock is released as soon as the push lands — the (slow) pipeline wait
     # lives in a separate job so it doesn't hold this lock.
     concurrency:
-      group: mirror-${{ github.ref }}
+      # On `delete` events github.ref is the DEFAULT branch, not the deleted ref
+      # — use github.event.ref so a deletion serializes against pushes to ITS
+      # ref (a push-then-delete of the same branch can't interleave), not against
+      # main's pushes.
+      group: mirror-${{ github.event_name == 'delete' && format('refs/{0}/{1}', github.event.ref_type, github.event.ref) || github.ref }}
       cancel-in-progress: false
     steps:
       # Check out by SHA (not by ref): a branch deletion has no live ref to check
-      # out, but github.sha is always the last commit of that ref, so this works
-      # for pushes and deletions alike. fetch-depth: 0 gives full history so GitLab
-      # receives complete ancestry (and the annotated-tag objects), not just the tip.
+      # out, but github.sha is always resolvable — on pushes it's the last commit
+      # of that ref, and on `delete` events GitHub reverts it to the default
+      # branch's tip (which exists and is all we need, since a deletion doesn't
+      # use the checkout). fetch-depth: 0 gives full history so GitLab receives
+      # complete ancestry (and the annotated-tag objects), not just the tip.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
@@ -99,9 +111,22 @@ jobs:
           GIT_SSH_COMMAND: "ssh -i ~/.ssh/gitlab_deploy_key -o IdentitiesOnly=yes"
         run: |
           git remote add gitlab "git@gitlab.com:${GITLAB_REPO}.git"
-          if [ "${{ github.event.deleted }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "delete" ] || [ "${{ github.event.deleted }}" = "true" ]; then
             # Mirror a deletion: remove the ref on GitLab (works for branches and tags).
-            git push gitlab ":$GITHUB_REF"
+            # On `delete` events the deleted ref is in github.event.ref/ref_type
+            # (GITHUB_REF is the default branch); on a push-with-deletion it's GITHUB_REF.
+            if [ "${{ github.event_name }}" = "delete" ]; then
+              DEL_REF="refs/${{ github.event.ref_type }}/${{ github.event.ref }}"
+            else
+              DEL_REF="$GITHUB_REF"
+            fi
+            # Idempotent: if the ref is already gone on GitLab (e.g., a push event
+            # deleted it first), don't fail the run.
+            if git ls-remote --exit-code gitlab "$DEL_REF" >/dev/null 2>&1; then
+              git push gitlab ":$DEL_REF"
+            else
+              echo "$DEL_REF already absent on GitLab; nothing to delete"
+            fi
           else
             case "$GITHUB_REF" in
               refs/tags/*)
@@ -142,7 +167,11 @@ jobs:
     # Only wait once the push has actually landed on GitLab. If the push failed,
     # there's no pipeline to wait for (and the run is already red).
     needs: mirror
-    # Only on pushes, not deletions. Two things are deliberate here:
+    # Only on pushes, not deletions. Three things are deliberate here:
+    #  - `github.event_name != 'delete'`: on a `delete` event github.event.deleted
+    #    is UNDEFINED (the event itself IS the deletion), so `!github.event.deleted`
+    #    alone would be true and this job would wait for a pipeline that never
+    #    exists. The event name is the reliable discriminator.
     #  - `${{ ... }}` is REQUIRED: a bare `!github.event.deleted` starts with `!`,
     #    which YAML reads as a tag, not an expression — the file won't parse
     #    (GitHub rejects it before running).
@@ -150,7 +179,7 @@ jobs:
     #    an explicit `if` can override the default "only run when dependencies
     #    succeed", so we don't rely on that default: if the push failed there's no
     #    pipeline to wait for, and we don't want a second, confusing failure.
-    if: ${{ !github.event.deleted && needs.mirror.result == 'success' }}
+    if: ${{ github.event_name != 'delete' && !github.event.deleted && needs.mirror.result == 'success' }}
     # The wait can take as long as a full GitLab pipeline (~30 min), so bound the
     # job well under the 360-min default.
     timeout-minutes: 45
