@@ -43,6 +43,15 @@ pp:lint:
     - when: on_success
   image: $GO_IMAGE
   script:
+    # Go toolchain must match go.mod's declared version. On GitLab the
+    # toolchain comes from $GO_IMAGE (the digest-pinned golang image), so this
+    # is the real guard: if GO_IMAGE drifts from go.mod, the shipped binary's
+    # stdlib (and its CVE surface) silently diverges from what go.mod promises.
+    # The identical check on GitHub (lint job) is a lockstep no-op there, since
+    # setup-go installs from go.mod. awk, not jq: the golang image has no jq.
+    - |
+      [ "$(go env GOVERSION)" = "go$(awk '$1=="go"{print $2}' go.mod)" ] \
+        || { echo "Go toolchain drift: $(go env GOVERSION) vs go.mod"; exit 1; }
     # gofmt is a hard gate (same check as `make lint` and the GitHub lint job):
     # a non-empty list of unformatted files fails. gofmt ships with the Go
     # toolchain, so no extra install.
@@ -53,8 +62,8 @@ pp:lint:
 # Same bash gate as the GitHub actionlint job: shellcheck on every script.
 # (GitLab validates .gitlab-ci.yml itself when it creates the pipeline, so
 # there is no separate YAML linter to run here; GitHub gets actionlint for
-# its workflow files.) The binary is x86_64 because GitLab.com shared
-# runners are; on an arm64 runner, swap in the .linux.aarch64 asset.
+# its workflow files.) The image is multi-arch, so it runs on amd64 or arm64
+# runners alike — no per-arch asset to swap.
 pp:shellcheck:
   stage: lint
   # Skip on the daily schedule pipeline (see pp:lint for why).
@@ -62,13 +71,14 @@ pp:shellcheck:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
     - when: on_success
-  image: $GO_IMAGE
+  # shellcheck runs from its official image, pinned by tag+digest (not a downloaded
+  # binary): the digest pins the exact bytes, and Renovate bumps tag+digest together
+  # (see renovate.json5), so there is no hand-kept hash to go stale. Same image +
+  # digest as the GitHub actionlint job's docker run, so a bump lands in one
+  # lockstep PR. The image has no git, but this job only needs shellcheck + the
+  # scripts (checked out by GitLab), so that's fine.
+  image: koalaman/shellcheck-alpine:v0.11.0@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002
   script:
-    - wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
-    # shellcheck ships no checksums file, so the hash is pinned here. A
-    # download step that doesn't check its bytes is an unpinned dependency.
-    - echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tgz" | sha256sum -c -
-    - tar -xJf /tmp/shellcheck.tgz -C /usr/local/bin --strip-components=1 shellcheck-v0.10.0/shellcheck
     - shellcheck scripts/*.sh
 
 pp:test:
@@ -178,9 +188,10 @@ pp:image-scan:
   # (The trivy DB download is not cached: it's a few MB, and caching it would
   # add a cache key to keep in sync for little gain.)
   image:
-    # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
-    # (a re-push of :0.53.0 would silently swap the scanner), so only the
-    # digest is a stable pin.
+    # Pinned by tag AND digest: the tag (0.53.0) is what Renovate tracks
+    # against the version series, and the digest pins the exact bytes (a
+    # re-push of :0.53.0 would otherwise silently swap the scanner). Renovate
+    # rewrites both in one PR (the built-in gitlabci manager handles this pin).
     name: aquasec/trivy:0.53.0@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
     entrypoint: [""]
   parallel:

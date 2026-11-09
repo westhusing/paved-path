@@ -1,0 +1,208 @@
+# Mirror every branch and tag from GitHub to GitLab, so GitLab runs its CI on
+# the same code. The README documents GitLab as "the same gates, second
+# platform — templates stay in lockstep"; without this, only `main` reaches
+# GitLab and PR branches are gated by GitHub Actions alone.
+#
+# Model: GitHub is the source of truth; GitLab is a CI mirror. Every ref pushed
+# to GitHub (a branch or a tag) is force-pushed to GitLab, which then runs its
+# own pipeline (base.yml on branches, base+release on tags). Force is deliberate:
+# Renovate rebases its branches, so GitLab must always match GitHub rather than
+# reject a non-fast-forward push. Tags are the exception — they're immutable, so
+# they're pushed WITHOUT force: a tag that already exists on GitLab with different
+# content is an error we want to see, not silently overwrite. Nothing is ever
+# pushed *from* GitLab, so force can't clobber work that only exists there.
+#
+# Auth: an SSH deploy key, not an HTTPS token. GitLab's docs name the deploy
+# key as the mechanism for pushing to *protected* branches (Settings > Repository
+# > Branch rules > <branch> > Allowed to push and merge > Deploy keys) and for
+# creating *protected* tags (Settings > Repository > Protected tags > <tag> >
+# Allowed to create). A write_repository deploy token is not the documented path
+# for protected refs, so a single SSH key mirrors everything (protected main,
+# plain branches, tags). Force-pushing to a protected branch additionally needs
+# that branch rule's "Allowed to force push" toggle on. See the handoff notes for
+# the exact clicks — none of them are expressible in this file.
+#
+# This is a GitHub Actions workflow, so it runs on GitHub and pushes to GitLab —
+# no feedback loop (GitLab doesn't run this file).
+#
+# Two jobs: `mirror` pushes the ref (serialized per-ref by a concurrency group),
+# and `wait-for-gitlab` (needs: mirror) polls the GitLab pipeline that push
+# triggered and fails if it fails. The wait is a SEPARATE job, not a step in
+# `mirror`, so it doesn't hold the per-ref concurrency lock for up to 30 minutes
+# — a new push can mirror while the previous one's pipeline is still running.
+#
+# Required secret: GITLAB_DEPLOY_KEY — the PRIVATE half of a GitLab project deploy
+# key (Settings > Repository > Deploy keys), created with write access. The public
+# half lives in GitLab; the private half is added here as a repository secret.
+#
+# Second secret: GITLAB_READ_TOKEN — a project access token with the read_api
+# scope. When present, wait-for-gitlab turns GitLab from an advisory mirror into
+# a real gate (make this workflow a required check on main to enforce it). Without
+# the token, GitLab results stay advisory: the mirror pushes and reports success
+# without waiting.
+
+name: mirror-to-gitlab
+on:
+  # All branches and all tags — a full mirror, not just main. A branch/tag
+  # deletion arrives as a push event with `deleted: true` (same trigger).
+  push:
+
+permissions:
+  contents: read   # checkout only; the GitLab push uses the SSH deploy key
+
+env:
+  # The GitLab path. It happens to match the GitHub repo here, but it's stated
+  # explicitly so a rename of one side doesn't silently break the other.
+  GITLAB_REPO: "westhusing/paved-path"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    # Serialize pushes per ref so a rapid push-then-push (or push-then-delete)
+    # to the same branch can't arrive out of order on GitLab. cancel-in-progress:
+    # false makes the later push WAIT for the earlier one to finish, not cancel it.
+    # This lock is released as soon as the push lands — the (slow) pipeline wait
+    # lives in a separate job so it doesn't hold this lock.
+    concurrency:
+      group: mirror-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      # Check out by SHA (not by ref): a branch deletion has no live ref to check
+      # out, but github.sha is always the last commit of that ref, so this works
+      # for pushes and deletions alike. fetch-depth: 0 gives full history so GitLab
+      # receives complete ancestry (and the annotated-tag objects), not just the tip.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Configure the SSH deploy key
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.GITLAB_DEPLOY_KEY }}" > ~/.ssh/gitlab_deploy_key
+          chmod 600 ~/.ssh/gitlab_deploy_key
+          # Pin gitlab.com's host key by hardcoding GitLab.com's published keys, so a
+          # spoofed host fails instead of being trusted on first contact (ssh-keyscan
+          # would accept whatever key it gets). If GitLab rotates these, this line fails
+          # loudly and we update it deliberately. Fingerprints: ed25519
+          # SHA256:eUXGGm1YGsMAS7vkcx6JOJdOGHPem5gQp4taiCfCLB8, rsa
+          # SHA256:ROQFvPThGrW4RuWLoL9tq9I9zJ42fK4XywyRtbOz/EQ.
+          echo "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf" >> ~/.ssh/known_hosts
+          echo "gitlab.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCsj2bNKTBSpIYDEGk9KxsGh3mySTRgMtXL583qmBpzeQ+jqCMRgBqB98u3z++J1sKlXHWfM9dyhSevkMwSbhoR8XIq/U0tCNyokEi/ueaBMCvbcTHhO7FcwzY92WK4Yt0aGROY5qX2UKSeOvuP4D6TPqKF1onrSzH9bx9XUf2lEdWT/ia1NEKjunUqu1xOB/StKDHMoX4/OKyIzuS0q/T1zOATthvasJFoPrAjkohTyaDUz2LN5JoH839hViyEG82yB+MjcFV5MU3N1l1QL3cVUCh93xSaua1N85qivl+siMkPGbO5xR/En4iEY6K2XPASUEMaieWVNTRCtJ4S8H+9" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Mirror the ref to GitLab
+        env:
+          # In env (not inline) so the key path is stable and no secret ever appears
+          # in a git error message that prints the remote URL.
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/gitlab_deploy_key -o IdentitiesOnly=yes"
+        run: |
+          git remote add gitlab "git@gitlab.com:${GITLAB_REPO}.git"
+          if [ "${{ github.event.deleted }}" = "true" ]; then
+            # Mirror a deletion: remove the ref on GitLab (works for branches and tags).
+            git push gitlab ":$GITHUB_REF"
+          else
+            case "$GITHUB_REF" in
+              refs/tags/*)
+                # Materialize the local annotated tag ref (checkout-by-SHA leaves a
+                # detached HEAD with no tag ref), then push it. No --force: tags are
+                # immutable, so a mismatch is an error we want to see.
+                git fetch origin "$GITHUB_REF"
+                git push gitlab "$GITHUB_REF"
+                ;;
+              refs/heads/main)
+                # main: fast-forward only, no --force. GitHub's main is never
+                # force-pushed, so GitLab's main can stay protected (no "allowed to
+                # force push" needed). A non-FF here means the two sides diverged —
+                # an error we want to see, not silently overwrite.
+                git push gitlab "HEAD:$GITHUB_REF"
+                ;;
+              *)
+                # Other branches: force so GitLab always matches GitHub (Renovate
+                # rebases its branches, which would otherwise be non-FF).
+                git push --force gitlab "HEAD:$GITHUB_REF"
+                ;;
+            esac
+          fi
+
+  # Wait for the GitLab pipeline the mirror push triggered, and fail if it fails.
+  # This is what turns the mirror from advisory into a gate: with this job,
+  # "mirror-to-gitlab" is green only when GitLab's own CI passed. Make this
+  # workflow a required check on main to enforce it. Needs GITLAB_READ_TOKEN (a
+  # project access token with read_api); without it, GitLab results stay advisory
+  # and the step warns + skips. Skipped on deletions (no pipeline to wait for).
+  #
+  # A separate job (not a step in `mirror`) so the per-ref concurrency lock is
+  # released as soon as the push lands — a new push can mirror while this job is
+  # still polling. It has NO concurrency group of its own: it only polls, so it
+  # must not serialize anything.
+  wait-for-gitlab:
+    runs-on: ubuntu-latest
+    # Only wait once the push has actually landed on GitLab. If the push failed,
+    # there's no pipeline to wait for (and the run is already red).
+    needs: mirror
+    # Only on pushes, not deletions. Two things are deliberate here:
+    #  - `${{ ... }}` is REQUIRED: a bare `!github.event.deleted` starts with `!`,
+    #    which YAML reads as a tag, not an expression — the file won't parse
+    #    (GitHub rejects it before running).
+    #  - `needs.mirror.result == 'success'` is stated explicitly. GitHub's docs say
+    #    an explicit `if` can override the default "only run when dependencies
+    #    succeed", so we don't rely on that default: if the push failed there's no
+    #    pipeline to wait for, and we don't want a second, confusing failure.
+    if: ${{ !github.event.deleted && needs.mirror.result == 'success' }}
+    # The wait can take as long as a full GitLab pipeline (~30 min), so bound the
+    # job well under the 360-min default.
+    timeout-minutes: 45
+    env:
+      GITLAB_READ_TOKEN: ${{ secrets.GITLAB_READ_TOKEN }}
+    steps:
+      - name: Wait for the GitLab pipeline
+        run: |
+          set -uo pipefail
+          if [ -z "${GITLAB_READ_TOKEN:-}" ]; then
+            echo "GITLAB_READ_TOKEN not set — GitLab results are advisory (not gating)."
+            exit 0
+          fi
+          # The API accepts a URL-encoded project path in place of the numeric id.
+          ENC=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$GITLAB_REPO")
+          BASE="https://gitlab.com/api/v4/projects/$ENC"
+          # Fail fast on a bad token/project rather than polling for 30 min.
+          if ! curl -sf -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" "$BASE" >/dev/null; then
+            echo "GitLab API call failed (bad token or project?)"; exit 1
+          fi
+          # Match the pipeline for THIS commit AND this exact ref (branch or tag).
+          # The ref filter matters: a release tag cut on main's commit would
+          # otherwise match main's old pipeline and pass before the (signing) tag
+          # pipeline is even created. jq (preinstalled on ubuntu-latest) parses the
+          # JSON; `// empty` prints nothing on a missing key or bad input, so a
+          # transient blip reads as "not yet" and the loop retries — no traceback,
+          # no false terminal state. (A python -c one-liner can't be used: its
+          # second line would be indented, which python rejects.)
+          pid=""
+          for _ in $(seq 1 24); do
+            pid=$(curl -sf -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" \
+              "$BASE/pipelines?sha=${GITHUB_SHA}&ref=${GITHUB_REF_NAME}&per_page=1" \
+              | jq -r '.[0].id // empty')
+            [ -n "$pid" ] && break
+            sleep 5
+          done
+          if [ -z "$pid" ]; then echo "no GitLab pipeline appeared for ${GITHUB_SHA} on ${GITHUB_REF_NAME}"; exit 1; fi
+          echo "waiting on GitLab pipeline $pid"
+          # Wait for a terminal state (up to ~30 min). A transient curl failure yields
+          # an empty status, which falls through to `*` and retries — only a real
+          # terminal state ends the loop. manual/scheduled never resolve on their own
+          # (they wait on a human), so treat them as done: pass with a warning rather
+          # than burning the full 30 minutes.
+          for _ in $(seq 1 360); do
+            status=$(curl -sf -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" \
+              "$BASE/pipelines/$pid" \
+              | jq -r '.status // empty')
+            case "$status" in
+              success) echo "GitLab pipeline $pid succeeded"; exit 0 ;;
+              failed|canceled|skipped) echo "GitLab pipeline $pid: $status"; exit 1 ;;
+              manual|scheduled) echo "GitLab pipeline $pid is '$status' (waiting on a human) — not blocking"; exit 0 ;;
+              *) sleep 5 ;;
+            esac
+          done
+          echo "timed out waiting for GitLab pipeline $pid"; exit 1

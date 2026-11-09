@@ -33,20 +33,32 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: |
-          wget -qO /tmp/actionlint.tgz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          # Download with the ORIGINAL filename (not a shortened name): sha256sum -c
+          # looks up the file by the name recorded in checksums.txt, so a renamed
+          # download makes it fail with "No such file or directory". Same pattern as
+          # the syft/cosign installs in release.yml.
+          wget -qO /tmp/actionlint_1.7.12_linux_amd64.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           # Verify the download before running it (same supply-chain stance as
-          # the cosign/syft installs in release.yml). Checksum verified against
-          # the v1.7.12 asset.
-          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tgz" | sha256sum -c -
-          tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint
-      # shellcheck is the same idea for the bash scripts.
-      - run: |
-          wget -qO /tmp/shellcheck.tgz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
-          echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tgz" | sha256sum -c -
-          tar -xJf /tmp/shellcheck.tgz -C /usr/local/bin --strip-components=1 shellcheck-v0.10.0/shellcheck
+          # the cosign/syft installs in release.yml): check against actionlint's
+          # own checksums.txt. A hardcoded sha256 would go stale on every
+          # Renovate version bump and break the job; the upstream checksums file
+          # is rewritten by the same bump, so no hash maintenance is needed.
+          wget -qO /tmp/actionlint_checksums.txt https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+          (cd /tmp && grep " actionlint_1.7.12_linux_amd64.tar.gz$" actionlint_checksums.txt | sha256sum -c -)
+          tar -xzf /tmp/actionlint_1.7.12_linux_amd64.tar.gz -C /usr/local/bin actionlint
       # No args: actionlint finds every workflow under .github/workflows.
       - run: actionlint
-      - run: shellcheck scripts/*.sh
+      # shellcheck runs from its official image, pinned by tag+digest (not a
+      # downloaded binary): the digest pins the exact bytes, and Renovate bumps
+      # tag+digest together (see renovate.json5), so there is no hand-kept hash to
+      # go stale. The image has no git, so it can't be a job `container:` (checkout
+      # would fail) — we run it via docker on the ubuntu runner instead. Same image
+      # + digest as GitLab's pp:shellcheck, so a bump lands in one lockstep PR.
+      - run: |
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            koalaman/shellcheck-alpine:v0.11.0@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002 \
+            shellcheck scripts/*.sh
       # The GitLab templates are included from a root .gitlab-ci.yml this repo
       # doesn't have (this repo IS the template), so `glab ci lint` can't run
       # here. Validate them against GitLab's own CI schema instead — the same
@@ -68,6 +80,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: { go-version-file: go.mod, cache: false }
+      # Go toolchain must match go.mod's declared version. On GitHub setup-go
+      # installs it FROM go.mod, so this is a lockstep no-op here — but the
+      # identical check on GitLab (pp:lint) guards the real risk: $GO_IMAGE
+      # drifting from go.mod, which would let the shipped binary's stdlib (and
+      # its CVE surface) silently diverge from what go.mod promises. awk, not
+      # jq: the golang image has no jq.
+      - run: |
+          [ "$(go env GOVERSION)" = "go$(awk '$1=="go"{print $2}' go.mod)" ] \
+            || { echo "Go toolchain drift: $(go env GOVERSION) vs go.mod"; exit 1; }
       # gofmt is a hard gate (same check as `make lint` and the GitLab pp:lint
       # job): a non-empty list of unformatted files fails. gofmt ships with the
       # Go toolchain, so no extra install.
@@ -107,9 +128,10 @@ jobs:
       # (bash) and passed in single quotes, because $GITHUB_SHA is not set
       # inside the trivy container. No ignore file: the gate fails on stdlib
       # CVEs embedded in a static binary; when one lands, bump Go to clear it.
-      # Digest = trivy v0.53.0. Pinned by digest, not the tag: tags are mutable
-      # (a re-push of :0.53.0 would silently swap the scanner), so only the
-      # digest is a stable pin.
+      # Pinned by tag AND digest: the tag (0.53.0) is what Renovate tracks
+      # against the version series, and the digest pins the exact bytes (a
+      # re-push of :0.53.0 would otherwise silently swap the scanner). Renovate
+      # rewrites both in one PR (see renovate.json5's trivy custom manager).
       - run: |
           img="paved-path/${{ matrix.service }}:${GITHUB_SHA}"
           docker run --rm \
