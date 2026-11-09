@@ -22,9 +22,63 @@
   // for this to run; the config is inert until then.)
   schedule: ["after 6am and before 7am on monday, tuesday, wednesday, thursday, friday"],
 
+  // Major updates (cosign v2→v3, docker 27→29, actions v7) are a distinct
+  // class: they change behavior, not just a pin. automerge is already false so
+  // none merge automatically; this label makes them filterable in the UI and
+  // flags them for the RC-test-before-stable process (see README / release
+  // notes) rather than being bulk-merged with the routine digest bumps.
+  packageRules: [
+    {
+      matchUpdateTypes: ["major"],
+      labels: ["major", "manual-review"],
+    },
+
+    // The gomod manager does NOT update the `go` directive by default (its docs:
+    // "Renovate's default behavior is not to propose upgrades to it"). This repo
+    // pins the exact patch in go.mod (1.27.3) and the toolchain gate in ci.yml /
+    // base.yml / Dockerfile requires it to match the images — so a Go bump that
+    // only touched the images would fail its own PR. This rule (the exact config
+    // from Renovate's gomod docs) makes the go line bump to latest in the same
+    // grouped PR as the images, so the gate stays green.
+    {
+      matchManagers: ["gomod"],
+      matchDepNames: ["go"],
+      matchDepTypes: ["golang"],
+      rangeStrategy: "bump",
+    },
+
+    // All Go toolchain references must land in ONE PR, or the shipped binary's
+    // stdlib drifts from what go.mod promises — the toolchain gate in ci.yml /
+    // base.yml exists to catch exactly that. The three references have different
+    // depNames/datasources, so they don't group on their own:
+    //   - go.mod `go` directive  -> depName "go",     golang-version datasource
+    //   - Dockerfile base image  -> depName "golang", docker (built-in manager)
+    //   - GitLab GO_IMAGE var    -> depName "golang", docker (custom manager)
+    // matchDepNames is an OR over the array, so this single rule captures all
+    // three and folds them into one PR (groupName). They still update to their
+    // own latest independently — the grouping only guarantees atomic landing.
+    //
+    // allowedVersions caps the whole group at 1.27.x: rangeStrategy:bump (above)
+    // would otherwise move the go directive to the newest release (1.28.x) while
+    // the images stay on 1.27-alpine, and the toolchain gate would fail that PR.
+    // A 1.28 move is a deliberate decision (new stdlib, re-test everything), so
+    // lift this cap on purpose when you make it.
+    //
+    // A regex (not a range like "<1.28") because the group spans two versioning
+    // schemes: golang-version (the go directive, "1.27.4") and docker (the image
+    // tags, "1.27-alpine"). Docker versioning doesn't support range operators,
+    // so a regex is the only form that works under both. It matches any 1.27
+    // variant (dot-suffixed, dash-suffixed, or bare) and excludes 1.28+.
+    {
+      matchDepNames: ["go", "golang"],
+      groupName: "Go toolchain (go.mod + images)",
+      allowedVersions: "/^1\\.27([.-]|$)/",
+    },
+  ],
+
   // Shell-embedded pins that no built-in manager extracts from `run:` /
   // `before_script` blocks. Each is a github-releases binary downloaded by
-  // version, or the trivy digest.
+  // version, or the trivy tag+digest pin.
   //
   // The `v` prefix is deliberately kept OUTSIDE the capture group: with the
   // default semver-coerced versioning, newValue comes back WITHOUT the v (e.g.
@@ -60,34 +114,75 @@
       datasourceTemplate: "github-releases",
     },
 
-    // shellcheck — version in the URL path AND the tarball filename.
+    // shellcheck — the official image, pinned by tag+digest. The GitHub copy is
+    // ci.yml's `docker run koalaman/shellcheck-alpine:vX@sha256:...` (a job
+    // `container:` won't work — the image has no git, so checkout would fail),
+    // which no built-in manager parses out of a `run:` block. The GitLab copy
+    // (base.yml's job-level `image: koalaman/shellcheck-alpine:vX@sha256:...`)
+    // is already tracked by the built-in gitlabci manager, so it's NOT listed
+    // here — listing it would double-report (same reason the trivy manager below
+    // excludes base.yml). Same depName on both, so a bump rewrites tag+digest in
+    // one lockstep PR. The digest pins the exact bytes, so there is no hand-kept
+    // hash to go stale (unlike the old downloaded-binary form).
+    //
+    // The tag is captured with `[^@\s]+` (the whole tag, INCLUDING the leading
+    // v), not `[0-9][0-9.]*`: shellcheck-alpine tags are v-prefixed (v0.11.0),
+    // so a digit-anchored capture matches nothing. Capturing the full tag also
+    // mirrors what gitlabci extracts for base.yml, keeping the two in lockstep.
     {
       customType: "regex",
-      managerFilePatterns: ["\\.github/workflows/ci\\.yml", "\\.gitlab/ci/base\\.yml"],
+      managerFilePatterns: ["\\.github/workflows/ci\\.yml"],
       matchStrings: [
-        "shellcheck-v(?<currentValue>[0-9][0-9.]*)\\.linux",
-        "koalaman/shellcheck/releases/download/v(?<currentValue>[0-9][0-9.]*)/",
+        "koalaman/shellcheck-alpine:(?<currentValue>[^@\\s]+)@sha256:(?<currentDigest>[0-9a-f]{64})",
       ],
-      depNameTemplate: "koalaman/shellcheck",
-      datasourceTemplate: "github-releases",
+      depNameTemplate: "koalaman/shellcheck-alpine",
+      datasourceTemplate: "docker",
     },
 
-    // actionlint — version in the URL path AND the tarball filename. GitHub only
-    // (GitLab's lint job uses shellcheck, not actionlint).
+    // actionlint — version in the URL path, the tarball filename, and the
+    // checksums.txt filename. The download is verified against actionlint's own
+    // checksums.txt (not a hardcoded hash), so a bump rewrites all three and
+    // needs no hash maintenance. GitHub only (GitLab's lint job uses shellcheck,
+    // not actionlint).
     {
       customType: "regex",
       managerFilePatterns: ["\\.github/workflows/ci\\.yml"],
       matchStrings: [
         "actionlint_(?<currentValue>[0-9][0-9.]*)_linux_amd64\\.tar\\.gz",
+        "actionlint_(?<currentValue>[0-9][0-9.]*)_checksums\\.txt",
         "rhysd/actionlint/releases/download/v(?<currentValue>[0-9][0-9.]*)/",
       ],
       depNameTemplate: "rhysd/actionlint",
       datasourceTemplate: "github-releases",
     },
 
-    // trivy digest — the GitHub shell-embedded copies only. The GitLab copy
-    // (base.yml's `name: aquasec/trivy@sha256:...`) is already handled by the
-    // built-in gitlabci manager, so listing it here too would double-report.
+    // govulncheck — `go install ...@vX.Y.Z` in the GitHub scan job, and the
+    // GOVULNCHECK_VERSION variable on GitLab (the install line there uses the
+    // variable, so only the variable's value is matched). Same depName on both,
+    // so a bump lands as one PR touching both platforms (lockstep).
+    {
+      customType: "regex",
+      managerFilePatterns: ["\\.github/workflows/ci\\.yml", "\\.gitlab/ci/base\\.yml"],
+      matchStrings: [
+        "govulncheck@v(?<currentValue>[0-9][0-9.]*)",
+        "GOVULNCHECK_VERSION: v(?<currentValue>[0-9][0-9.]*)",
+      ],
+      depNameTemplate: "golang/vuln",
+      // github-tags, not github-releases: golang/vuln stopped creating GitHub
+      // Releases at v1.1.4 (Jan 2025) and now cuts tags only — the releases
+      // datasource would report v1.1.4 as latest and never track new versions.
+      datasourceTemplate: "github-tags",
+    },
+
+    // trivy tag+digest — the GitHub shell-embedded copies only. The GitLab
+    // copy (base.yml's `name: aquasec/trivy:...@sha256:...`) is already handled
+    // by the built-in gitlabci manager, so listing it here too would double-report.
+    // Capture BOTH the tag (currentValue) and the digest (currentDigest): a
+    // digest-only capture matches nothing now that the reference carries a tag.
+    // With both, Renovate bumps the tag to the latest release AND re-resolves
+    // the digest for that new tag, rewriting `:0.53.0@sha256:<old>` to
+    // `:<new>@sha256:<new-digest>` in one PR; if the tag is current but a new
+    // digest exists for it, only the digest changes.
     {
       customType: "regex",
       managerFilePatterns: [
@@ -96,9 +191,27 @@
         "\\.github/workflows/rescan\\.yml",
       ],
       matchStrings: [
-        "aquasec/trivy@sha256:(?<currentDigest>[0-9a-f]{64})",
+        "aquasec/trivy:(?<currentValue>[0-9][0-9.]*)@sha256:(?<currentDigest>[0-9a-f]{64})",
       ],
       depNameTemplate: "aquasec/trivy",
+      datasourceTemplate: "docker",
+    },
+
+    // golang image — the GitLab GO_IMAGE variable only. The Dockerfile's
+    // `FROM golang:...` is already tracked by the built-in dockerfile manager,
+    // which yields depName "golang" (the tag becomes currentValue). This regex
+    // reproduces that exact identity — depName "golang", the tag as currentValue,
+    // and the digest as currentDigest — so a Go update lands in ONE PR touching
+    // both the Dockerfile and the GitLab variable (lockstep). The built-in
+    // gitlabci manager only reads job-level `image:`/`services:`, not top-level
+    // `variables:`, so without this the GitLab pin would silently drift.
+    {
+      customType: "regex",
+      managerFilePatterns: ["^\\.gitlab/ci/base\\.yml$"],
+      matchStrings: [
+        "GO_IMAGE: golang:(?<currentValue>[^@\\s]+)@sha256:(?<currentDigest>[0-9a-f]{64})",
+      ],
+      depNameTemplate: "golang",
       datasourceTemplate: "docker",
     },
   ],

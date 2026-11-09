@@ -16,6 +16,12 @@ WORKDIR /src
 
 # Copy go.mod first so dependency layers cache across commits.
 COPY go.mod ./
+# Guard the thing we actually ship: the toolchain that compiles the binary must
+# match go.mod's declared version. ci.yml / base.yml run the same gate, but on a
+# separately-installed toolchain — this one runs the image's own `go`, so it
+# catches a FROM pin that drifts from go.mod at build time. awk, not jq: the
+# alpine image has no jq.
+RUN [ "$(go env GOVERSION)" = "go$(awk '$1=="go"{print $2}' go.mod)" ]
 RUN go mod download
 
 COPY . .
