@@ -133,7 +133,7 @@
       customType: "regex",
       managerFilePatterns: ["\\.github/workflows/ci\\.yml"],
       matchStrings: [
-        "koalaman/shellcheck-alpine:(?<currentValue>[^@\\s]+)@sha256:(?<currentDigest>[0-9a-f]{64})",
+        "koalaman/shellcheck-alpine:(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[0-9a-f]{64})",
       ],
       depNameTemplate: "koalaman/shellcheck-alpine",
       datasourceTemplate: "docker",
@@ -191,7 +191,7 @@
         "\\.github/workflows/rescan\\.yml",
       ],
       matchStrings: [
-        "aquasec/trivy:(?<currentValue>[0-9][0-9.]*)@sha256:(?<currentDigest>[0-9a-f]{64})",
+        "aquasec/trivy:(?<currentValue>[0-9][0-9.]*)@(?<currentDigest>sha256:[0-9a-f]{64})",
       ],
       depNameTemplate: "aquasec/trivy",
       datasourceTemplate: "docker",
@@ -205,11 +205,22 @@
     // both the Dockerfile and the GitLab variable (lockstep). The built-in
     // gitlabci manager only reads job-level `image:`/`services:`, not top-level
     // `variables:`, so without this the GitLab pin would silently drift.
+    //
+    // Two deliberate choices here:
+    //   - The matchString is the bare image ref (`golang:...@sha256:...`), NOT
+    //     `GO_IMAGE: golang:...`. autoReplace replaces the whole match with the
+    //     default template (`{{depName}}:{{newValue}}@{{newDigest}}` = `golang:...`),
+    //     so including the `GO_IMAGE: ` key in the match would drop it on a real
+    //     update and break base.yml. Matching only the ref leaves the key intact.
+    //   - currentDigest captures WITH the `sha256:` prefix (like the built-in
+    //     managers do). The docker datasource returns newDigest prefixed, so a
+    //     bare-hex currentDigest would look "different" from an identical
+    //     prefixed newDigest and spawn a spurious no-op digest PR.
     {
       customType: "regex",
-      managerFilePatterns: ["^\\.gitlab/ci/base\\.yml$"],
+      managerFilePatterns: ["\\.gitlab/ci/base\\.yml"],
       matchStrings: [
-        "GO_IMAGE: golang:(?<currentValue>[^@\\s]+)@sha256:(?<currentDigest>[0-9a-f]{64})",
+        "golang:(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[0-9a-f]{64})",
       ],
       depNameTemplate: "golang",
       datasourceTemplate: "docker",
