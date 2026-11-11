@@ -20,7 +20,19 @@
   // Weekday schedule: enough for security pin bumps, keeps PR noise down on a
   // small repo. (Renovate must be installed as an app on GitHub and/or GitLab
   // for this to run; the config is inert until then.)
-  schedule: ["after 6am and before 7am on monday, tuesday, wednesday, thursday, friday"],
+  //
+  // Two deliberate choices here:
+  //   - timezone: without it the window was evaluated in UTC (1-2am local),
+  //     which is fine for the window but easy to misread when editing it.
+  //   - a WIDE window: the hosted app runs a repo every few hours, not on
+  //     the hour, so the old one-hour window was missed on many days. Outside
+  //     the window Renovate still maintains existing branches but cannot
+  //     CREATE new ones — so a missed day meant no new PRs at all (this is
+  //     why trivy/cosign/Go went quiet after the custom managers landed).
+  // Cron syntax (the docs recommend it over the deprecated Later phrasing):
+  // every hour from midnight to before 9am, Monday-Friday.
+  timezone: "America/New_York",
+  schedule: ["* 0-8 * * 1-5"],
 
   // Major updates (cosign v2→v3, docker 27→29, actions v7) are a distinct
   // class: they change behavior, not just a pin. automerge is already false so
