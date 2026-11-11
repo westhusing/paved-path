@@ -4,4 +4,4 @@ module example.com/paved-path
 // line and installs that exact toolchain, so CI builds with the same Go as
 // the Dockerfile's digest-pinned image (1.27.3). A bare "go 1.27" would let
 // setup-go float to the newest 1.27 patch and drift from the image.
-go 1.27.3
+go 1.27.4
