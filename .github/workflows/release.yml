@@ -124,7 +124,7 @@ jobs:
           img="$REGISTRY/$REPO/${{ matrix.service }}:$GITHUB_SHA"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            --entrypoint "" aquasec/trivy:0.53.0@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9 sh -c \
+            --entrypoint "" aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb sh -c \
             "trivy image --exit-code 1 --severity HIGH,CRITICAL '$img'"
 
   promote:
