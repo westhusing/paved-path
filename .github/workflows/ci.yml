@@ -78,7 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with: { go-version-file: go.mod, cache: false }
       # Go toolchain must match go.mod's declared version. On GitHub setup-go
       # installs it FROM go.mod, so this is a lockstep no-op here — but the
@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with: { go-version-file: go.mod, cache: false }
       - run: go test ./...
       # Race detector on every commit. ubuntu-latest has a C toolchain, so no
@@ -143,7 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with: { go-version-file: go.mod, cache: false }
       # Pinned, not @latest (see Makefile). v1.9.0 requires Go >= 1.26;
       # go.mod declares 1.27, so setup-go above already satisfies it.
