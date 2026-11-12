@@ -192,7 +192,7 @@ pp:image-scan:
     # against the version series, and the digest pins the exact bytes (a
     # re-push of :0.53.0 would otherwise silently swap the scanner). Renovate
     # rewrites both in one PR (the built-in gitlabci manager handles this pin).
-    name: aquasec/trivy:0.53.0@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
+    name: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
     entrypoint: [""]
   parallel:
     matrix:
@@ -215,7 +215,7 @@ pp:image-scan:
 pp:rescan-latest-release:
   stage: scan
   image:
-    name: aquasec/trivy:0.53.0@sha256:53e6715d5c67e80e629f0dfa3bd6ed2bc74bdcaa4bdbe934a5a1811a249db6b9
+    name: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
     entrypoint: [""]
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
