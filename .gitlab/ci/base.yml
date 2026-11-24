@@ -26,7 +26,7 @@ variables:
   # patch (1.27.4); go.mod declares the same, so setup-go on GitHub installs
   # the identical toolchain. Newer Go is what keeps the stdlib CVEs out of
   # static binaries — see the image-scan job below.
-  GO_IMAGE: golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523
+  GO_IMAGE: golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
   # govulncheck is pinned, not @latest: an unpinned tool version in a
   # "reproducible" repo is the same class of bug as an unpinned base image.
   # v1.9.0 requires Go >= 1.26, which the image above satisfies.
